@@ -440,7 +440,7 @@ class CalculatePriceTensor(Middleware):
 
 
 class PriceInference(Middleware):
-    def __init__(self, ckpt_path):
+    def __init__(self, ckpt_path,tb_markets=None):
         ckpt_file = torch.load(ckpt_path)
         max_traded_length_train = int(ckpt_file['state_dict']['proj_traded_ladder.weight'].shape[1] / 64)
         track_mapping = ckpt_file['track_to_int']
@@ -465,6 +465,8 @@ class PriceInference(Middleware):
 
         self.process_dict = dataset.process_dict
 
+        self.tb_markets = tb_markets
+
 
     def __call__(self, market) -> None:
         if not market.context.get('vp_trigger_seconds'):
@@ -473,8 +475,10 @@ class PriceInference(Middleware):
         if not market.context.get('price_list'):
             return
 
+        market_name = [x['marketName'] for x in self.tb_markets if x['marketId'] == market.market_id][0]
+
         if market.seconds_to_start >= min(market.context['vp_trigger_seconds']):
-            race_name_split = market.market_book.market_definition.name.split()
+            race_name_split = market_name.split()
             race_type = race_name_split[2] if len(race_name_split) > 2 else "Unknown"
 
             extra_info = {

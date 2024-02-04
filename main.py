@@ -47,6 +47,7 @@ else:
     logger.setLevel(logging.CRITICAL)
 
 def run_process(run_type, markets):
+    global TB_MARKETS
     if run_type == 'live':
         trading = betfairlightweight.APIClient("vladgav", "Cosmos1324=", app_key="00Fi1NHkj2pPuCVg")
         trading.login_interactive()
@@ -59,6 +60,16 @@ def run_process(run_type, markets):
             country_codes=["AU"],
             market_types=['WIN']
         )
+
+        markets_and_names = trading.betting.list_market_catalogue(
+            betfairlightweight.filters.market_filter(
+                event_type_ids=['7'],
+                market_countries=['AU'],
+                market_type_codes=['WIN']
+            ),max_results=250,lightweight=True)
+
+
+        tb_markets = [x for x in markets_and_names if 'Trot' not in x['marketName'] and 'Pace' not in x['marketName']]
 
     elif run_type == 'test':
         client = clients.SimulatedClient()
@@ -92,7 +103,7 @@ def run_process(run_type, markets):
             CalculatePriceTensor()
         )
         framework.add_market_middleware(
-            PriceInference(ckpt_path=CKPT_PATH)
+            PriceInference(ckpt_path=CKPT_PATH, tb_markets=tb_markets)
         )
         framework.add_strategy(
             NeuralAutoTrader(
