@@ -128,7 +128,7 @@ class CalculateVolumePriceTrigger(Middleware):
         if not market.context.get('top_selections'):
             return
 
-        if not market.market_book.streaming_update['rc']:
+        if not market.market_book.streaming_update.get('rc'):
             return
 
         if not market.context.get('trade_deltas'):
@@ -256,6 +256,9 @@ class RecordLastXTrades(Middleware):
 
 class RecordTradeDeltas(Middleware):
     def __call__(self, market) -> None:
+        if not market.market_book.streaming_update.get('rc'):
+            return
+
         traded_vol_update = [d for d in market.market_book.streaming_update['rc'] if
                              'tv' in d and d['id']]
 
@@ -379,6 +382,9 @@ class CalculateVWAPTrigger(Middleware):
 
 class CalculatePriceTensor(Middleware):
     def __call__(self,market) -> None:
+        if not market.market_book.streaming_update.get('rc'):
+            return
+
         if not market.context.get('vp_trigger_seconds'):
             return
 

@@ -10,7 +10,7 @@ class OrderRecorder(LoggingControl):
     NAME = "ORDER_RECORDER"
 
     def __init__(self, logname, *args, **kwargs):
-        self.path = "../../monitoring/logs/" + logname + ".csv"
+        self.path = "logs/" + logname + ".csv"
         self.field_names = [
             "bet_id",
             "strategy_name",

@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 from flumine.flumine import Flumine
-from implementation.flumine.middleware import GetHistoricalCommission, RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor
+from middleware import GetHistoricalCommission, RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor
 from strategies.strategy import NeuralAutoTrader
 from logging_controls.logging_controls import OrderRecorder
 
@@ -102,9 +102,6 @@ def run_process(run_type, markets):
         framework.add_market_middleware(
             FindTopSelections()
         )
-        # framework.add_market_middleware(
-        #     GetPricesFromScoredHoldout(SCORED_PATH)
-        # )
         framework.add_market_middleware(
             GetHistoricalCommission()
         )

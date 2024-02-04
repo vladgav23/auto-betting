@@ -74,7 +74,7 @@ class NeuralAutoTrader(BaseStrategy):
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
             if runner_context.live_trade_count == 0:
-                if (1.03 > (predicted_wap / runner.last_price_traded) > 1.015) and predicted_wap > best_lay_price:
+                if (1.03 > (predicted_wap / runner.last_price_traded) > 1.015) and predicted_wap > best_lay_price and not runner_is_firmer:
                     # create trade
                     trade = Trade(market_book.market_id,runner.selection_id,runner.handicap,self)
                     # create order
