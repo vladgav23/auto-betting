@@ -39,36 +39,10 @@ STAKE_UNIT = 1
 RUN_TYPE = 'live' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
 MAX_TTJ = 120
-SCORED_PATH = "model/predictions/holdout-model-predictions.csv"
 CKPT_PATH = "E:/checkpoints/price-ladder-epoch=06-val_loss=0.1166.ckpt"
 
 if RUN_TYPE == 'live':
     logger.setLevel(logging.INFO)
-
-    # connection = mysql.connector.connect(
-    #     host="172.26.48.1",
-    #     user="vlad",
-    #     password="howler",
-    #     database="bf"
-    # )
-    #
-    # cursor = connection.cursor()
-    #
-    # # Query to fetch the column
-    # query = "SELECT DISTINCT market_id FROM thoroughbreds_model_table WHERE event_date = '" + datetime.today().strftime('%Y-%m-%d') + "'"
-    # cursor.execute(query)
-    #
-    # # Fetch all rows from the executed query
-    # rows = cursor.fetchall()
-    #
-    # # Store the results in a list. Since rows is a list of tuples,
-    # # we'll extract the first element from each tuple using a list comprehension.
-    # market_ids_to_sub = [row[0] for row in rows]
-    #
-    # # Close the cursor and connection
-    # cursor.close()
-    # connection.close()
-
 else:
     logger.setLevel(logging.CRITICAL)
 
