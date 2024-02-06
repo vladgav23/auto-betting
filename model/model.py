@@ -55,21 +55,14 @@ class PriceLadderModel(pl.LightningModule):
         self.proj_lay = torch.nn.Linear(2, 64, bias=False)
         self.proj_back_lay = torch.nn.Linear(10 * 64 * 2, 256)
 
-        # Back and lay ladder sequence attention
-        self.tf_back_lay = torch.nn.TransformerEncoderLayer(d_model=256, nhead=4, dim_feedforward=512, batch_first=True)
-
         # Traded ladder projection
         self.proj_traded_price = torch.nn.Linear(2, 64, bias=False)
         self.proj_traded_ladder = torch.nn.Linear(self.max_traded_length * 64, 512)
-
-        # Traded ladder transformer and projection
-        self.tf_traded = torch.nn.TransformerEncoderLayer(d_model=512, nhead=8, dim_feedforward=1024, batch_first=True)
 
         # Last trades projection and transformer
         self.proj_single_last_trade = torch.nn.Linear(3, 64, bias=False)
         self.tf_single_last_trade = torch.nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True)
         self.proj_all_last_trades = torch.nn.Linear(100 * 64, 1024)
-        self.tf_all_last_trades = torch.nn.TransformerEncoderLayer(d_model=1024, nhead=16, dim_feedforward=1024, batch_first=True)
 
         # Project runner (Back/Lay + Traded + Last 100 trades + Mover + LPT
         self.proj_runner = torch.nn.Linear(256 + 512 + 1024 + 32 + 32, 1024)
@@ -78,9 +71,6 @@ class PriceLadderModel(pl.LightningModule):
         self.proj_market = torch.nn.Linear((1024 * 6) + 128 + 256 + 512, 2048)
 
         self.reg = torch.nn.Sequential(
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout_prob),
-            torch.nn.Linear(2048, 2048),
             torch.nn.GELU(),
             torch.nn.Dropout(dropout_prob),
             torch.nn.Linear(2048, 2048),
@@ -109,12 +99,10 @@ class PriceLadderModel(pl.LightningModule):
         projected_lay = self.proj_lay(pred_tensor_dict['lay']).view(batch_size, 6, -1)
         cat_back_lay = torch.cat((projected_back, projected_lay), dim=2)
         projected_back_lay = self.proj_back_lay(cat_back_lay)
-        transformed_back_lay = F.gelu(self.tf_back_lay(projected_back_lay))
 
         # Process traded ladder
         projected_traded = self.proj_traded_price(pred_tensor_dict['traded']).view(batch_size, 6, -1)
         projected_traded_ladder = self.proj_traded_ladder(projected_traded)
-        transformed_traded_ladder = F.gelu(self.tf_traded(projected_traded_ladder))
 
         # Process last trades
         trade_mask = (pred_tensor_dict['last_trades'] == torch.zeros(3, device=self.device)).all(3).view(batch_size * 6, 100)
@@ -122,12 +110,11 @@ class PriceLadderModel(pl.LightningModule):
         projected_single_trade = self.proj_single_last_trade(pred_tensor_dict['last_trades']).view(batch_size * 6, 100, 64)
         transformed_single_trade = F.gelu(self.tf_single_last_trade(projected_single_trade, src_key_padding_mask=trade_mask).view(batch_size, 6, -1))
         projected_all_trades = self.proj_all_last_trades(transformed_single_trade)
-        transformed_all_trades = F.gelu(self.tf_all_last_trades(projected_all_trades))
 
         # Project runner
         projected_runner = F.dropout(self.proj_runner(
             torch.cat(
-                (transformed_back_lay, transformed_traded_ladder, transformed_all_trades, projected_mover_flag, projected_lpts), dim=2
+                (projected_back_lay, projected_traded_ladder, projected_all_trades, projected_mover_flag, projected_lpts), dim=2
             )
         ),p=self.dropout_prob,training=self.training)
 
