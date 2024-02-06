@@ -1,11 +1,11 @@
 import torch
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision('high')
 import pytorch_lightning as pl
 import torch.nn.functional as F
 # import torch.nn as nn
 # import math
 from torcheval.metrics.functional import r2_score
-from .datasets import PriceLadderDataModule
+from datasets import PriceLadderDataModule
 
 # class PositionalEncoding(torch.nn.Module):
 #     def __init__(self, d_model, max_len=5000):
@@ -26,7 +26,7 @@ class PriceLadderModel(pl.LightningModule):
     def __init__(self, max_traded_length, track_to_int, rt_to_int, learning_rate: float = 1e-5, weight_decay: float = 1e-6, dropout_prob: float = 0.1):
         super(PriceLadderModel, self).__init__()
 
-        # self.markets_to_track = []
+        self.dropout_prob = dropout_prob
         self.track_to_int = track_to_int
         self.rt_to_int = rt_to_int
 
@@ -75,16 +75,19 @@ class PriceLadderModel(pl.LightningModule):
         self.proj_runner = torch.nn.Linear(256 + 512 + 1024 + 32 + 32, 1024)
 
         # Project market
-        self.proj_market = torch.nn.Linear((1024 * 4) + 128 + 256 + 512, 2048)
+        self.proj_market = torch.nn.Linear((1024 * 6) + 128 + 256 + 512, 2048)
 
         self.reg = torch.nn.Sequential(
             torch.nn.GELU(),
-            torch.nn.Dropout(0.1),
+            torch.nn.Dropout(dropout_prob),
+            torch.nn.Linear(2048, 2048),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout_prob),
             torch.nn.Linear(2048, 2048),
             torch.nn.GELU(),
             torch.nn.Linear(2048, 1024),
             torch.nn.GELU(),
-            torch.nn.Linear(1024, 3 * 4)
+            torch.nn.Linear(1024, 3 * 6)
         )
 
     def forward(self, pred_tensor_dict):
@@ -94,30 +97,30 @@ class PriceLadderModel(pl.LightningModule):
         projected_seconds = self.proj_sts(pred_tensor_dict['norm_sts'].unsqueeze(1))
         projected_mover_flag = self.proj_mover(
             pred_tensor_dict['mover_flags'].to(torch.float).view(-1, 1)
-        ).view(batch_size, 4, -1)
+        ).view(batch_size, 6, -1)
         projected_lpts = self.proj_lpts(
             pred_tensor_dict['lpts'].view(-1, 1)
-        ).view(batch_size, 4, -1)
+        ).view(batch_size, 6, -1)
         embedded_track = self.embed_track(pred_tensor_dict['track'])
         embedded_rt = self.embed_racetype(pred_tensor_dict['race_type'])
 
         # Process back and lay ladders
-        projected_back = self.proj_back(pred_tensor_dict['back']).view(batch_size, 4, -1)
-        projected_lay = self.proj_lay(pred_tensor_dict['lay']).view(batch_size, 4, -1)
+        projected_back = self.proj_back(pred_tensor_dict['back']).view(batch_size, 6, -1)
+        projected_lay = self.proj_lay(pred_tensor_dict['lay']).view(batch_size, 6, -1)
         cat_back_lay = torch.cat((projected_back, projected_lay), dim=2)
         projected_back_lay = self.proj_back_lay(cat_back_lay)
         transformed_back_lay = F.gelu(self.tf_back_lay(projected_back_lay))
 
         # Process traded ladder
-        projected_traded = self.proj_traded_price(pred_tensor_dict['traded']).view(batch_size, 4, -1)
+        projected_traded = self.proj_traded_price(pred_tensor_dict['traded']).view(batch_size, 6, -1)
         projected_traded_ladder = self.proj_traded_ladder(projected_traded)
         transformed_traded_ladder = F.gelu(self.tf_traded(projected_traded_ladder))
 
         # Process last trades
-        trade_mask = (pred_tensor_dict['last_trades'] == torch.zeros(3, device=self.device)).all(3).view(batch_size * 4, 100)
+        trade_mask = (pred_tensor_dict['last_trades'] == torch.zeros(3, device=self.device)).all(3).view(batch_size * 6, 100)
 
-        projected_single_trade = self.proj_single_last_trade(pred_tensor_dict['last_trades']).view(batch_size * 4, 100, 64)
-        transformed_single_trade = F.gelu(self.tf_single_last_trade(projected_single_trade, src_key_padding_mask=trade_mask).view(batch_size, 4, -1))
+        projected_single_trade = self.proj_single_last_trade(pred_tensor_dict['last_trades']).view(batch_size * 6, 100, 64)
+        transformed_single_trade = F.gelu(self.tf_single_last_trade(projected_single_trade, src_key_padding_mask=trade_mask).view(batch_size, 6, -1))
         projected_all_trades = self.proj_all_last_trades(transformed_single_trade)
         transformed_all_trades = F.gelu(self.tf_all_last_trades(projected_all_trades))
 
@@ -126,7 +129,7 @@ class PriceLadderModel(pl.LightningModule):
             torch.cat(
                 (transformed_back_lay, transformed_traded_ladder, transformed_all_trades, projected_mover_flag, projected_lpts), dim=2
             )
-        ),p=0.1,training=self.training)
+        ),p=self.dropout_prob,training=self.training)
 
         projected_market = self.proj_market(torch.cat((projected_runner.view(batch_size, -1), projected_seconds, embedded_track, embedded_rt), dim=1))
 
@@ -135,9 +138,9 @@ class PriceLadderModel(pl.LightningModule):
         return raw_output
 
     def custom_loss(self, outputs, targets):
-        target_volumes = (torch.exp(targets.view(-1, 4, 4)[:,:,3]) / torch.exp(targets.view(-1, 4, 4)[:,:,3]).sum(dim=1).unsqueeze(1)).unsqueeze(2)
+        target_volumes = (torch.exp(targets.view(-1, 6, 4)[:,:,3]) / torch.exp(targets.view(-1, 6, 4)[:,:,3]).sum(dim=1).unsqueeze(1)).unsqueeze(2)
 
-        losses = F.l1_loss(outputs.view(-1, 4, 3), targets.view(-1, 4, 4)[:, :, :3], reduction='none')
+        losses = F.l1_loss(outputs.view(-1, 6, 3), targets.view(-1, 6, 4)[:, :, :3], reduction='none')
 
         vols_weighted_losses = torch.sum(target_volumes * losses,dim=[1,2])
 
@@ -150,7 +153,7 @@ class PriceLadderModel(pl.LightningModule):
         outputs = self(batch['pred_tensors'])
         loss = self.custom_loss(outputs, batch['target'])
         self.log('train_loss', loss)
-        self.log('batch_r2', r2_score(outputs.reshape(-1), batch['target'].reshape(-1, 4, 4)[:, :, :3].reshape(-1)))
+        self.log('batch_r2', r2_score(outputs.reshape(-1), batch['target'].reshape(-1, 6, 4)[:, :, :3].reshape(-1)))
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -198,15 +201,10 @@ class PriceLadderModel(pl.LightningModule):
                 'lr_scheduler': scheduler,
                 'monitor': 'val_loss'}
 
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint["track_to_int"] = self.track_to_int
-        checkpoint["rt_to_int"] = self.rt_to_int
-        checkpoint["max_traded_length"] = self.max_traded_length
-        return checkpoint
-
 # Model testing
 if __name__ == '__main__':
-    dm = PriceLadderDataModule("E:/Data/Extracted/Processed/Train/", "E:/Data/Extracted/Processed/Train.json",
+    dm = PriceLadderDataModule("E:/Data/Extracted/Processed/TrainNew/", "E:/Data/Extracted/Processed/TrainNew.json",
+                               "E:/Data/Extracted/Processed/TrainNew_UpdatedLengths.json",
                                train_split=0.8,
                                num_cached_markets_factor=1,
                                mtl_factor=1.1,
@@ -215,11 +213,16 @@ if __name__ == '__main__':
 
     dm.setup()
 
-    model = PriceLadderModel(max_traded_length=dm.max_traded_length, num_tracks=dm.unique_tracks, num_race_types=dm.unique_race_types)
+    model = PriceLadderModel(max_traded_length=dm.max_traded_length,
+                                 track_to_int=dm.track_to_int,
+                                 rt_to_int=dm.rt_to_int)
+
+    model.eval()
 
     for i, sample_data in enumerate(iter(dm.val_dataloader())):
         if i > 10:
             break
 
-        loss = model.validation_step(sample_data, i)
-        print(loss)
+        with torch.no_grad():
+            loss = model.validation_step(sample_data, i)
+            print(loss)

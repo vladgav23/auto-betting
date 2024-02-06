@@ -5,8 +5,10 @@ import torch
 import math
 import smart_open
 import json
+import glob
+import pandas as pd
 
-from implementation.flumine.middleware import CalculateVolumePriceTrigger, FindTopSelections, RecordLastXTrades, RecordTargetLadders, RecordTradeDeltas
+from middleware import CalculateVolumePriceTrigger, FindTopSelections, RecordLastXTrades, RecordTargetLadders, RecordTradeDeltas
 from pythonjsonlogger import jsonlogger
 from unittest.mock import patch
 from flumine import utils, clients, FlumineSimulation
@@ -30,7 +32,8 @@ class PriceRecorder(BaseStrategy):
         market.context['max_traded_length'] = 0
 
     def check_market_book(self, market, market_book):
-        if market.market_type == "WIN" and "trot" not in market_book.market_definition.name.lower() and "pace" not in market_book.market_definition.name.lower():
+        lcase_name = market_book.market_definition.name.lower()
+        if market.market_type == "WIN" and "trot" not in lcase_name and "pace" not in lcase_name:
             return True
 
     def process_market_book(self, market, market_book):
@@ -41,7 +44,7 @@ class PriceRecorder(BaseStrategy):
             latest_trigger_second = min(market.context['vp_trigger_seconds'])
 
             # If there has been a trade and a trigger
-            if 120 >= market.seconds_to_start >= 30 and latest_trigger_second == market.seconds_to_start and [x for x in market_book.streaming_update['rc'] if 'tv' in x]:
+            if 180 >= market.seconds_to_start >= 30 and latest_trigger_second == market.seconds_to_start and [x for x in market_book.streaming_update['rc'] if 'tv' in x]:
                 market_update_tensor_list = []
                 selection_ids = []
                 for runner in market_book.runners:
@@ -105,7 +108,7 @@ class PriceRecorder(BaseStrategy):
         return differences
 
     def process_closed_market(self, market, market_book):
-        if market.context['price_list'] and market.context['target_ladders'] and len(market.context['top_selections']) == 4:
+        if market.context['price_list'] and market.context['target_ladders'] and len(market.context['top_selections']) == 6:
             # Trim target ladders to +/- 5 ticks from trigger LTP
             for ladder in market.context['target_ladders']:
 
@@ -131,13 +134,15 @@ class PriceRecorder(BaseStrategy):
 
             sts_list = [x['seconds_to_start'] for x in market.context['price_list']]
 
-            torch.save(market.context['price_list'], "E:/Data/Extracted/Processed/Holdout/" + market.market_id + ".pt")
+            removed_non_target = [x for x in market.context['price_list'] if 'target' in x]
+
+            torch.save(removed_non_target, "E:/Data/Extracted/Processed/HoldoutNew/" + market.market_id + ".pt")
 
             stats_dict = {
                 'market_id': market.market_id,
                 'track': market.market_book.market_definition.venue,
                 'race_name': market.market_book.market_definition.name,
-                'total_length': len(sts_list),
+                'total_length': len(removed_non_target),
                 'max_traded_length': market.context['max_traded_length'],
                 'max_seconds_to_start': max(sts_list),
                 'min_seconds_to_start': min(sts_list)
@@ -145,13 +150,18 @@ class PriceRecorder(BaseStrategy):
 
             stats_str = json.dumps(stats_dict)
 
-            with open("E:/Data/Extracted/Processed/Holdout.json", 'a') as file:
+            with open("E:/Data/Extracted/Processed/HoldoutNew.json", 'a') as file:
                 file.write(stats_str + '\n')
 
 def run_process(markets):
     # Set Flumine to simulation mode
     client = clients.SimulatedClient()
     framework = FlumineSimulation(client=client)
+
+    # Remove simulated middleware and add my own
+    framework._market_middleware = []
+
+
 
     # Set parameters for our strategy
     strategy = PriceRecorder(
@@ -161,7 +171,7 @@ def run_process(markets):
         # listener_kwargs specifies the time period we simulate for each market
         market_filter={
             "markets": markets,
-            "listener_kwargs": {"cumulative_runner_tv": True}
+            "listener_kwargs": {"seconds_to_start": 300, "inplay": False ,"cumulative_runner_tv": True}
         }
     )
 
@@ -174,10 +184,10 @@ def run_process(markets):
             RecordTradeDeltas()
         )
         framework.add_market_middleware(
-            CalculateVolumePriceTrigger()
+            RecordLastXTrades()
         )
         framework.add_market_middleware(
-            RecordLastXTrades()
+            CalculateVolumePriceTrigger()
         )
         framework.add_market_middleware(
             RecordTargetLadders()
@@ -194,11 +204,34 @@ if __name__ == "__main__":
         for file in files:
             streaming_files.append(os.path.join(root, file))
 
-    all_markets = [x for x in streaming_files if os.path.basename(x).startswith(('1.'))]  # All the markets we want to simulate
-    processes = os.cpu_count() - 1  # Returns the number of CPUs in the system.
-    markets_per_process = 16  # 8 is optimal as it prevents data leakage.
+    all_markets = [x for x in streaming_files if os.path.basename(x).startswith(('1.'))]
 
-    # run_process(all_markets)
+    bsp_files_path = "E:/Data/BSP/Aus_Thoroughbreds*"
+    files_to_read = glob.glob(bsp_files_path)
+    bsp_list = []
+    for file in files_to_read:
+        try:
+            bsp_year = pd.read_csv(file, usecols=['MARKET_ID'])
+            bsp_year = bsp_year.drop_duplicates()
+            bsp_year['MARKET_ID'] = '1.' + bsp_year['MARKET_ID'].astype(str)
+            market_ids = bsp_year['MARKET_ID'].tolist()
+        except Exception as e:
+            bsp_year = pd.read_csv(file, usecols=['market_id'])
+            bsp_year = bsp_year.drop_duplicates()
+            bsp_year['market_id'] = bsp_year['market_id'].astype(str)
+            market_ids = bsp_year['market_id'].tolist()
+
+        bsp_list = bsp_list + market_ids
+
+    bsp_list = set(bsp_list)
+
+    all_markets = [x for x in all_markets if os.path.basename(x).rstrip(".bz2") in bsp_list]
+
+    # All the markets we want to simulate
+    processes = os.cpu_count() - 1  # Returns the number of CPUs in the system.
+    markets_per_process = 8  # 8 is optimal as it prevents data leakage.
+
+    # run_process([x for x in all_markets if '1.131270437' in x])
 
     _process_jobs = []
     with futures.ProcessPoolExecutor(max_workers=processes) as p:

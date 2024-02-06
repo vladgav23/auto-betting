@@ -24,8 +24,6 @@ class NeuralAutoTrader(BaseStrategy):
         self.max_back_price = max_back_price
 
     def check_market_book(self, market: Market, market_book: MarketBook) -> bool:
-        # if market.event_name # contains trot or pace - then return False
-
         # Ignore closed or in-play markets
         if market_book.status != "CLOSED" and not market_book.inplay:
             return True
@@ -60,61 +58,41 @@ class NeuralAutoTrader(BaseStrategy):
             pred_max_price = runner_data['predicted_max_price']
             pred_min_price = runner_data['predicted_min_price']
             predicted_wap = runner_data['predicted_wap']
-
-            back_movers_exist = len(market.context['back_movers']) > 0
-            lay_movers_exist = len(market.context['lay_movers']) > 0
-            runner_is_firmer = runner.selection_id in market.context['back_movers']
-            runner_is_drifter = runner.selection_id in market.context['lay_movers']
-
-            if back_movers_exist:
-                mover_price = market.context['back_mover_price'][0]
-            elif lay_movers_exist:
-                mover_price = market.context['lay_mover_price'][0]
+            mover_flag = runner.selection_id in market.context['vp_trigger_selections']
 
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
             if runner_context.live_trade_count == 0:
-                if (1.03 > (predicted_wap / runner.last_price_traded) > 1.015) and predicted_wap > best_lay_price and not runner_is_firmer:
+                if (pred_min_price >= best_lay_price) and mover_flag == False:
                     # create trade
                     trade = Trade(market_book.market_id,runner.selection_id,runner.handicap,self)
                     # create order
                     entry_order = trade.create_order(side='LAY',order_type=LimitOrder(best_lay_price,self.stake_unit),
                                                 notes={
                                                     'predicted_max': pred_max_price,
+                                                    'predicted_min': pred_min_price,
                                                     'pred_price': predicted_wap,
                                                     'market_seconds_to_start': market.seconds_to_start,
                                                     'commission': market.context['commission'],
-                                                    'runner_firmer': runner_is_firmer,
-                                                    'runner_drifter': runner_is_drifter
+                                                    'mover': mover_flag,
+                                                    'last_price': runner.last_price_traded
                                                 })
 
                     market.place_order(entry_order)
-
-                    # if back_movers_exist:
-                    #     back_trade = Trade(market_book.market_id, market.context['back_movers'][0],0,self)
-                    #     best_back_mover = [flumine.utils.get_price(x.ex.available_to_back,0) for x in market_book.runners if x.selection_id == market.context['back_movers'][0]][0]
-                    #
-                    #     back_order = back_trade.create_order(side='BACK', order_type=LimitOrder(best_back_mover, self.stake_unit),
-                    #                                     notes={
-                    #                                         'pred_price': predicted_wap,
-                    #                                         'market_seconds_to_start': market.seconds_to_start,
-                    #                                         'commission': market.context['commission']
-                    #                                     }
-                    #                                     )
-                    #
-                    #     market.place_order(back_order)
-                # elif predicted_wap < best_back_price:
-                #     trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
-                #     # create order
-                #     entry_order = trade.create_order(side='BACK', order_type=LimitOrder(best_back_price, self.stake_unit),
-                #                                notes={
-                #                                    'type': 'entry',
-                #                                    'exit_price_required': pred_min_price,
-                #                                    'pred_price': predicted_wap,
-                #                                    'projected': 'decrease',
-                #                                    'market_seconds_to_start': market.seconds_to_start,
-                #                                    'commission': market.context['commission']
-                #                                })
+                elif (pred_max_price <= best_back_price) and mover_flag == True:
+                    # create trade
+                    trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
+                    # create order
+                    entry_order = trade.create_order(side='BACK', order_type=LimitOrder(best_back_price, self.stake_unit),
+                                                     notes={
+                                                         'predicted_max': pred_max_price,
+                                                         'predicted_min': pred_min_price,
+                                                         'pred_price': predicted_wap,
+                                                         'market_seconds_to_start': market.seconds_to_start,
+                                                         'commission': market.context['commission'],
+                                                         'mover': mover_flag,
+                                                         'last_price': runner.last_price_traded
+                                                     })
 
                     market.place_order(entry_order)
 

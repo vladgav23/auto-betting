@@ -2,6 +2,10 @@ from model import PriceLadderModel
 from datasets import PriceLadderDataModule
 import pandas as pd
 import os
+import torch
+import json
+
+from datetime import datetime
 from pytorch_lightning import seed_everything
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning import Trainer
@@ -17,13 +21,17 @@ if __name__ == '__main__':
     early_stop_callback = EarlyStopping(
         monitor='val_loss',
         min_delta=0.00,
-        patience=8,
+        patience=5,
         verbose=True,
         mode='min'
     )
+
+    checkpoint_path = "E:/checkpoints/"+datetime.now().strftime('%Y%m%d_%H%M')
+
+    os.mkdir(checkpoint_path)
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
-        dirpath='E:/checkpoints/',
+        dirpath=checkpoint_path,
         filename='price-ladder-{epoch:02d}-{val_loss:.4f}'
     )
 
@@ -33,16 +41,19 @@ if __name__ == '__main__':
 
     # Feed into model
     with trainer.init_module():
-        dm = PriceLadderDataModule("E:/Data/Extracted/Processed/Train/",
-                                   "E:/Data/Extracted/Processed/Train.json",
+        data_dir = "E:/Data/Extracted/Processed/TrainNew_Postprocessed/"
+        dm = PriceLadderDataModule(data_dir=data_dir,
+                                   stats_file="E:/Data/Extracted/Processed/TrainNew_newstats.json",
                                    train_split=0.8,
-                                   num_cached_markets_factor=5,
-                                   mtl_factor=1.1,
-                                   batch_size=128)
+                                   batch_size=256)
         dm.setup()
 
-        model = PriceLadderModel(max_traded_length=dm.max_traded_length,
-                                 track_to_int=dm.track_to_int,
-                                 rt_to_int=dm.rt_to_int)
+        sample_tensor = torch.load(data_dir + os.listdir(data_dir)[0])[0]
+        track_to_int = json.load(open('E:/Data/Extracted/Processed/TrainNew_track_to_int.json'))
+        rt_to_int = json.load(open('E:/Data/Extracted/Processed/TrainNew_rt_to_int.json'))
+
+        model = PriceLadderModel(max_traded_length=sample_tensor['traded'].shape[1],
+                                 track_to_int=track_to_int,
+                                 rt_to_int=rt_to_int)
 
     trainer.fit(model, dm)

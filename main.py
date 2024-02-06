@@ -9,6 +9,7 @@ import pandas as pd
 import random
 import math
 import betfairlightweight
+import glob
 
 from betfairlightweight.filters import streaming_market_filter
 from concurrent import futures
@@ -36,10 +37,10 @@ logger.addHandler(log_handler)
 # Params
 LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
 STAKE_UNIT = 1
-RUN_TYPE = 'live' # or 'test'
+RUN_TYPE = 'test' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
-MAX_TTJ = 120
-CKPT_PATH = "E:/checkpoints/price-ladder-epoch=06-val_loss=0.1166.ckpt"
+MAX_TTJ = 300
+CKPT_PATH = "E:/checkpoints/20240206_1507/price-ladder-epoch=01-val_loss=0.1190.ckpt"
 
 if RUN_TYPE == 'live':
     logger.setLevel(logging.INFO)
@@ -47,19 +48,12 @@ else:
     logger.setLevel(logging.CRITICAL)
 
 def run_process(run_type, markets):
-    global TB_MARKETS
     if run_type == 'live':
         trading = betfairlightweight.APIClient("vladgav", "Cosmos1324=", app_key="00Fi1NHkj2pPuCVg")
         trading.login_interactive()
         client = clients.BetfairClient(trading)
         client.min_bet_validation = False
         framework = Flumine(client=client)
-
-        market_filter = streaming_market_filter(
-            event_type_ids=["7"],
-            country_codes=["AU"],
-            market_types=['WIN']
-        )
 
         markets_and_names = trading.betting.list_market_catalogue(
             betfairlightweight.filters.market_filter(
@@ -69,7 +63,11 @@ def run_process(run_type, markets):
             ),max_results=250,lightweight=True)
 
 
-        tb_markets = [x for x in markets_and_names if 'Trot' not in x['marketName'] and 'Pace' not in x['marketName']]
+        tb_markets = [x for x in markets_and_names if 'Trot' not in x['marketName'] and 'Pace' not in x['marketName']] # TODO: convert to worker maybe?
+
+        market_filter = streaming_market_filter(
+            market_ids=[x['marketId'] for x in tb_markets]
+        )
 
     elif run_type == 'test':
         client = clients.SimulatedClient()
@@ -83,6 +81,8 @@ def run_process(run_type, markets):
 
         client.min_bet_validation = False
 
+        tb_markets = None
+
     with patch('builtins.open', smart_open.open):
         framework.add_market_middleware(
             FindTopSelections()
@@ -94,10 +94,10 @@ def run_process(run_type, markets):
             RecordTradeDeltas()
         )
         framework.add_market_middleware(
-            CalculateVolumePriceTrigger()
+            RecordLastXTrades()
         )
         framework.add_market_middleware(
-            RecordLastXTrades()
+            CalculateVolumePriceTrigger()
         )
         framework.add_market_middleware(
             CalculatePriceTensor()
@@ -108,13 +108,14 @@ def run_process(run_type, markets):
         framework.add_strategy(
             NeuralAutoTrader(
                 market_filter=market_filter,
-                max_trade_count=1,
+                max_trade_count=5,
                 stake_unit=STAKE_UNIT,
-                max_back_price=12,
+                max_back_price=10,
                 max_selection_exposure=1000,
                 max_order_exposure=1000,
                 max_seconds_to_start=MAX_TTJ,
-                run_type=run_type
+                run_type=run_type,
+                conflate_ms=50
             )
         )
         framework.add_logging_control(
@@ -139,25 +140,38 @@ if __name__ == "__main__":
 
         data_files = sorted(data_files, key=os.path.basename)
 
-        scored_file = pd.read_csv(SCORED_PATH)
-        scored_file['market_id'] = scored_file['market_id'].astype(str)
+        bsp_files_path = "E:/Data/BSP/Aus_Thoroughbreds*"
+        files_to_read = glob.glob(bsp_files_path)
+        bsp_list = []
+        for file in files_to_read:
+            try:
+                bsp_year = pd.read_csv(file, usecols=['MARKET_ID'])
+                bsp_year = bsp_year.drop_duplicates()
+                bsp_year['MARKET_ID'] = '1.' + bsp_year['MARKET_ID'].astype(str)
+                market_ids = bsp_year['MARKET_ID'].tolist()
+            except Exception as e:
+                bsp_year = pd.read_csv(file, usecols=['market_id'])
+                bsp_year = bsp_year.drop_duplicates()
+                bsp_year['market_id'] = bsp_year['market_id'].astype(str)
+                market_ids = bsp_year['market_id'].tolist()
 
-        scored_markets = scored_file['market_id'].drop_duplicates().tolist()
+            bsp_list = bsp_list + market_ids
 
-        data_files = [x for x in data_files if Path(x).stem in scored_markets]
-        data_files = [x for x in data_files if os.path.basename(x).startswith(('1.'))]
+        bsp_list = set(bsp_list)
+
+        data_files = [x for x in data_files if os.path.basename(x).rstrip(".bz2") in bsp_list]
 
         # random.seed(85083)
         # data_files = random.sample(data_files, 10)
 
         # data_files = [x for x in data_files if os.path.basename(x).startswith("1.215694796")]
 
-        processes = os.cpu_count() - 1  # Returns the number of CPUs in the system.
+        processes = 10 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
         # processes = 1  # Returns the number of CPUs in the system.
         markets_per_process = 8   # 8 is optimal as it prevents data leakage.
 
-        # run_process(RUN_TYPE,data_files)
-        #
+        # run_process(RUN_TYPE,data_files[:40])
+
         chunk = min(
             markets_per_process, math.ceil(len(data_files) / processes)
         )

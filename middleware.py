@@ -8,8 +8,7 @@ import pandas as pd
 import glob
 from flumine.markets.middleware import Middleware
 from statistics import mean
-from model.datasets import PriceLadderDataset, PriceLadderDataModule
-from model.model import PriceLadderModel
+from postprocessing import process_dict
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,7 @@ class GetHistoricalCommission(Middleware):
 
 class FindTopSelections(Middleware):
     def __call__(self, market) -> None:
-        if market.seconds_to_start <= 120 and not market.context.get('top_selections'):
+        if market.seconds_to_start <= 180 and not market.context.get('top_selections'):
             market.context['min_ltp'] = [{
                 'selection_id': x.selection_id,
                 'min_ltp': x.last_price_traded}
@@ -112,7 +111,7 @@ class FindTopSelections(Middleware):
                 if ltp and runner_min_ltp['min_ltp'] and ltp < runner_min_ltp['min_ltp']:
                     runner_min_ltp['min_ltp'] = ltp
 
-            top_list = sorted(market.context['min_ltp'], key=lambda x: float('inf') if x['min_ltp'] is None else x['min_ltp'])[:4]
+            top_list = sorted(market.context['min_ltp'], key=lambda x: float('inf') if x['min_ltp'] is None else x['min_ltp'])[:6]
             market.context['top_selections'] = [x['selection_id'] for x in top_list]
 
 class CalculateVolumePriceTrigger(Middleware):
@@ -126,6 +125,9 @@ class CalculateVolumePriceTrigger(Middleware):
             market.context['vp_trigger_seconds'] = []
 
         if not market.context.get('top_selections'):
+            return
+
+        if len(market.context['top_selections']) != 6:
             return
 
         if not market.market_book.streaming_update.get('rc'):
@@ -143,80 +145,10 @@ class CalculateVolumePriceTrigger(Middleware):
         if not volume_trigger:
             return
 
-        traded_vol_update = [d for d in market.market_book.streaming_update['rc'] if
-                             'tv' in d and d['id'] in market.context['top_selections']]
-
-        if not traded_vol_update:
-            return
-
-        atb_update = [d for d in market.market_book.streaming_update['rc'] if
-                      'atb' in d and d['id'] in market.context['top_selections']]
-        atl_update = [d for d in market.market_book.streaming_update['rc'] if
-                      'atl' in d and d['id'] in market.context['top_selections']]
-
-        tick_condition_sels = []
-        back_mover_sels = []
-        lay_mover_sels = []
-        for tvu_id in [x['id'] for x in traded_vol_update]:
-            back_tick_condition = False
-            lay_tick_condition = False
-
-            if atb_update:
-                best_back = next(flumine.utils.get_price(runner.ex.available_to_back, 0) for
-                    runner in
-                    market.market_book.runners if
-                    runner.selection_id == tvu_id)
-
-                if best_back:
-                    back_zerod = flumine.utils.price_ticks_away(best_back, 2)
-
-                    atb_ladder_for_selection = [x['atb'] for x in atb_update if x['id'] == tvu_id]
-
-                    if atb_ladder_for_selection:
-                        back_tick_condition = back_zerod in [y[0] for y in atb_ladder_for_selection[0] if y[1] == 0]
-
-            if atl_update:
-                best_lay = next(flumine.utils.get_price(runner.ex.available_to_lay, 0) for
-                    runner in
-                    market.market_book.runners if
-                    runner.selection_id == tvu_id)
-
-                if best_lay:
-                    lay_zerod = flumine.utils.price_ticks_away(best_lay, 2)
-
-                    atl_ladder_for_selection = [x['atl'] for x in atl_update if x['id'] == tvu_id]
-
-                    if atl_ladder_for_selection:
-                        lay_tick_condition = lay_zerod in [y[0] for y in atl_ladder_for_selection[0] if y[1] == 0]
-
-            tick_condition = back_tick_condition or lay_tick_condition
-
-            if tick_condition:
-                tick_condition_sels.append(tvu_id)
-
-            if back_tick_condition:
-                back_mover_sels.append(tvu_id)
-
-            if lay_tick_condition:
-                lay_mover_sels.append(tvu_id)
 
         if market_total_vol > 0:
             market.context['vp_trigger_selections'] = list(set(
-                [x['id'] for x in market.context['trade_deltas'] if
-                                                       x['id'] in tick_condition_sels and x['id'] in volume_trigger]))
-
-            market.context['back_movers'] = list(set(
-                [x['id'] for x in market.context['trade_deltas'] if
-                 x['id'] in back_mover_sels and x['id'] in volume_trigger]))
-
-            market.context['back_mover_price'] = [x.last_price_traded for x in market.market_book.runners if x.selection_id in market.context['back_movers']]
-
-            market.context['lay_movers'] = list(set(
-                [x['id'] for x in market.context['trade_deltas'] if
-                 x['id'] in lay_mover_sels and x['id'] in volume_trigger]))
-
-            market.context['lay_mover_price'] = [x.last_price_traded for x in market.market_book.runners if
-                                                  x.selection_id in market.context['lay_movers']]
+                [x['id'] for x in market.context['trade_deltas'] if x['id'] in volume_trigger]))
 
             if market.context.get('vp_trigger_selections') and market.seconds_to_start >= 30:
                 market.context['vp_trigger_seconds'].append(market.seconds_to_start)
@@ -391,8 +323,9 @@ class CalculatePriceTensor(Middleware):
         latest_trigger_second = min(market.context['vp_trigger_seconds'])
 
         # If there has been a trade and a trigger
-        if 120 >= market.seconds_to_start >= 30 and latest_trigger_second == market.seconds_to_start and \
+        if 180 >= market.seconds_to_start >= 30 and latest_trigger_second == market.seconds_to_start and \
                 [x for x in market.market_book.streaming_update['rc'] if 'tv' in x]:
+
             market_update_tensor_list = []
             selection_ids = []
             for runner in market.market_book.runners:
@@ -441,32 +374,25 @@ class CalculatePriceTensor(Middleware):
 
 class PriceInference(Middleware):
     def __init__(self, ckpt_path,tb_markets=None):
-        ckpt_file = torch.load(ckpt_path)
-        max_traded_length_train = int(ckpt_file['state_dict']['proj_traded_ladder.weight'].shape[1] / 64)
-        track_mapping = ckpt_file['track_to_int']
-        race_type_mapping = ckpt_file['rt_to_int']
+        from model.model import PriceLadderModel, PriceLadderDataModule
 
-        self.model = PriceLadderModel(max_traded_length=max_traded_length_train,
-                                 track_to_int=track_mapping,
-                                 rt_to_int=race_type_mapping).to("cpu")
+        ckpt_file = torch.load(ckpt_path)
+        self.max_traded_length_train = int(ckpt_file['state_dict']['proj_traded_ladder.weight'].shape[1] / 64)
+        with open("E:\Data\Extracted\Processed\TrainNew_track_to_int.json", 'r') as file:
+            self.track_to_int = json.load(file)
+
+        with open("E:\Data\Extracted\Processed\TrainNew_rt_to_int.json", 'r') as file:
+            self.rt_to_int = json.load(file)
+
+        self.model = PriceLadderModel(max_traded_length=self.max_traded_length_train,
+                                 track_to_int=self.track_to_int,
+                                 rt_to_int=self.rt_to_int).to("cpu")
 
         self.model.load_state_dict(ckpt_file['state_dict'])
-
         self.model.eval()
-
-        dataset = PriceLadderDataset(
-            directory="E:/Data/Extracted/Processed/Train",
-            stats_file="E:/Data/Extracted/Processed/Train.json",
-            max_traded_length=max_traded_length_train,
-                                 track_to_int=track_mapping,
-                                 rt_to_int=race_type_mapping, live=True)
-
-        dataset.load_market_data_json()
-
-        self.process_dict = dataset.process_dict
+        self.collate_batch = PriceLadderDataModule.collate_batch
 
         self.tb_markets = tb_markets
-
 
     def __call__(self, market) -> None:
         if not market.context.get('vp_trigger_seconds'):
@@ -475,26 +401,38 @@ class PriceInference(Middleware):
         if not market.context.get('price_list'):
             return
 
-        market_name = [x['marketName'] for x in self.tb_markets if x['marketId'] == market.market_id][0]
+        if self.tb_markets is None:
+            market_name = market.market_book.market_definition.name
+        else:
+            market_name = [x['marketName'] for x in self.tb_markets if x['marketId'] == market.market_id]
 
-        if market.seconds_to_start >= min(market.context['vp_trigger_seconds']):
-            race_name_split = market_name.split()
+        if not market_name:
+            return
+
+        if market.seconds_to_start == min(market.context['vp_trigger_seconds']):
+            race_name_split = market_name[0].split()
             race_type = race_name_split[2] if len(race_name_split) > 2 else "Unknown"
 
-            extra_info = {
-                'track': market.market_book.market_definition.venue,
-                'race_type': race_type
-            }
-            dict_to_score = PriceLadderDataModule.collate_batch(
-                [self.process_dict(market.context['price_list'], extra_info)],
+            dict_to_score = self.collate_batch(
+                [process_dict(market.context['price_list'],
+                              track_name=market.market_book.market_definition.venue.lower(),
+                              race_type=race_type.lower(),
+                              max_traded_length=self.max_traded_length_train,
+                              min_sts=30,
+                              max_sts=180,
+                              back_lay_length=10,
+                              last_trades_len=100,
+                              track_to_int=self.track_to_int,
+                              rt_to_int=self.rt_to_int
+                              )],
                 has_target=False
             )
 
             with torch.no_grad():
-                prediction = self.model(dict_to_score['pred_tensors']).view(1, 4, 3)
+                prediction = self.model(dict_to_score['pred_tensors']).view(1, 6, 3)
 
             # Transform prices into ratio to LPT
-            prediction[:, :, :3] = prediction[:, :, :3] * dict_to_score['pred_tensors']['lpts'].unsqueeze(2)
+            prediction = prediction * dict_to_score['pred_tensors']['lpts'].unsqueeze(2)
 
             runner_dicts = []
             for i, runner in enumerate(dict_to_score['metadata']['selection_ids'][0]):
