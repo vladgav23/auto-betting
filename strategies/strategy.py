@@ -63,7 +63,7 @@ class NeuralAutoTrader(BaseStrategy):
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
             if runner_context.live_trade_count == 0:
-                if (pred_min_price >= best_lay_price) and mover_flag == False:
+                if (predicted_wap / best_lay_price) >= 1.01 and mover_flag == False and runner.last_price_traded == best_lay_price:
                     # create trade
                     trade = Trade(market_book.market_id,runner.selection_id,runner.handicap,self)
                     # create order
@@ -79,7 +79,7 @@ class NeuralAutoTrader(BaseStrategy):
                                                 })
 
                     market.place_order(entry_order)
-                elif (pred_max_price <= best_back_price) and mover_flag == True:
+                elif (predicted_wap / best_back_price) <= 0.975 and mover_flag == True and runner.last_price_traded == best_back_price:
                     # create trade
                     trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
                     # create order

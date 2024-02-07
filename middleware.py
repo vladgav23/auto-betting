@@ -376,8 +376,9 @@ class PriceInference(Middleware):
     def __init__(self, ckpt_path,tb_markets=None):
         from model.model import PriceLadderModel, PriceLadderDataModule
 
-        ckpt_file = torch.load(ckpt_path)
-        self.max_traded_length_train = int(ckpt_file['state_dict']['proj_traded_ladder.weight'].shape[1] / 64)
+        ckpt_file = torch.load(ckpt_path, map_location="cpu")
+        traded_weight = ckpt_file['state_dict']['proj_traded_ladder.weight']
+        self.max_traded_length_train = int(traded_weight.shape[1] / 128)
         with open("E:\Data\Extracted\Processed\TrainNew_track_to_int.json", 'r') as file:
             self.track_to_int = json.load(file)
 
@@ -389,6 +390,9 @@ class PriceInference(Middleware):
                                  rt_to_int=self.rt_to_int).to("cpu")
 
         self.model.load_state_dict(ckpt_file['state_dict'])
+
+        del traded_weight, ckpt_file
+
         self.model.eval()
         self.collate_batch = PriceLadderDataModule.collate_batch
 
@@ -432,7 +436,7 @@ class PriceInference(Middleware):
                 prediction = self.model(dict_to_score['pred_tensors']).view(1, 6, 3)
 
             # Transform prices into ratio to LPT
-            prediction = prediction * dict_to_score['pred_tensors']['lpts'].unsqueeze(2)
+            prediction = (prediction * dict_to_score['pred_tensors']['lpts'].unsqueeze(2))
 
             runner_dicts = []
             for i, runner in enumerate(dict_to_score['metadata']['selection_ids'][0]):
