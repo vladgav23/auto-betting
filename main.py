@@ -36,11 +36,11 @@ logger.addHandler(log_handler)
 
 # Params
 LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
-STAKE_UNIT = 1
+STAKE_UNIT = 10
 RUN_TYPE = 'test' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
 MAX_TTJ = 300
-CKPT_PATH = "E:/checkpoints/20240206_1507/price-ladder-epoch=01-val_loss=0.1190.ckpt"
+CKPT_PATH = "E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt"
 
 if RUN_TYPE == 'live':
     logger.setLevel(logging.INFO)
@@ -108,11 +108,11 @@ def run_process(run_type, markets):
         framework.add_strategy(
             NeuralAutoTrader(
                 market_filter=market_filter,
-                max_trade_count=5,
+                max_trade_count=3,
                 stake_unit=STAKE_UNIT,
-                max_back_price=10,
-                max_selection_exposure=1000,
-                max_order_exposure=1000,
+                max_back_price=25,
+                max_selection_exposure=100,
+                max_order_exposure=100,
                 max_seconds_to_start=MAX_TTJ,
                 run_type=run_type,
                 conflate_ms=50
@@ -166,7 +166,7 @@ if __name__ == "__main__":
 
         # data_files = [x for x in data_files if os.path.basename(x).startswith("1.215694796")]
 
-        processes = 10 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
+        processes = 6 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
         # processes = 1  # Returns the number of CPUs in the system.
         markets_per_process = 8   # 8 is optimal as it prevents data leakage.
 
