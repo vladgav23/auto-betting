@@ -26,7 +26,6 @@ class OrderRecorder(LoggingControl):
             "elapsed_seconds_executable",
             "order_status",
             "profit",
-            "commission",
             "market_note",
             "trade_notes",
             "order_notes"
@@ -69,7 +68,6 @@ class OrderRecorder(LoggingControl):
                     "side": order.side,
                     "elapsed_seconds_executable": order.elapsed_seconds_executable,
                     "profit": order.profit,
-                    "commission": order.notes['commission'],
                     "order_status": order.status.value,
                     "market_note": order.trade.market_notes,
                     "trade_notes": order.trade.notes_str,

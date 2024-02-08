@@ -36,8 +36,8 @@ logger.addHandler(log_handler)
 
 # Params
 LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
-STAKE_UNIT = 10
-RUN_TYPE = 'test' # or 'test'
+STAKE_UNIT = 0.1
+RUN_TYPE = 'live' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
 MAX_TTJ = 300
 CKPT_PATH = "E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt"
@@ -62,7 +62,6 @@ def run_process(run_type, markets):
                 market_type_codes=['WIN']
             ),max_results=250,lightweight=True)
 
-
         tb_markets = [x for x in markets_and_names if 'Trot' not in x['marketName'] and 'Pace' not in x['marketName']] # TODO: convert to worker maybe?
 
         market_filter = streaming_market_filter(
@@ -80,21 +79,17 @@ def run_process(run_type, markets):
         }
 
         client.min_bet_validation = False
-
         tb_markets = None
 
     with patch('builtins.open', smart_open.open):
-        framework.add_market_middleware(
-            FindTopSelections()
-        )
-        framework.add_market_middleware(
-            GetHistoricalCommission()
-        )
         framework.add_market_middleware(
             RecordTradeDeltas()
         )
         framework.add_market_middleware(
             RecordLastXTrades()
+        )
+        framework.add_market_middleware(
+            FindTopSelections()
         )
         framework.add_market_middleware(
             CalculateVolumePriceTrigger()
@@ -110,7 +105,7 @@ def run_process(run_type, markets):
                 market_filter=market_filter,
                 max_trade_count=3,
                 stake_unit=STAKE_UNIT,
-                max_back_price=25,
+                max_back_price=15,
                 max_selection_exposure=100,
                 max_order_exposure=100,
                 max_seconds_to_start=MAX_TTJ,
@@ -118,6 +113,7 @@ def run_process(run_type, markets):
                 conflate_ms=50
             )
         )
+
         framework.add_logging_control(
             OrderRecorder(
                 logname=LOGNAME+'_'+RUN_TYPE

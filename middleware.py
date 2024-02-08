@@ -125,33 +125,30 @@ class CalculateVolumePriceTrigger(Middleware):
             market.context['vp_trigger_seconds'] = []
 
         if not market.context.get('top_selections'):
+            market.context['vp_trigger_selections'] = []
             return
 
         if len(market.context['top_selections']) != 6:
-            return
-
-        if not market.market_book.streaming_update.get('rc'):
+            market.context['vp_trigger_selections'] = []
             return
 
         if not market.context.get('trade_deltas'):
+            market.context['vp_trigger_selections'] = []
             return
 
         market_total_vol = sum([runner['total_matched'] for runner in market.market_book.runners])
 
         volume_trigger = set(
-            [x['id'] for x in market.context['trade_deltas'] if x['delta'][1] / market_total_vol >= 0.01]
-        )
+            [x['id'] for x in market.context['trade_deltas'] if x['delta'][1] / market_total_vol >= 0.01])
 
         if not volume_trigger:
+            market.context['vp_trigger_selections'] = []
             return
 
-
-        if market_total_vol > 0:
+        if market.seconds_to_start >= 30:
             market.context['vp_trigger_selections'] = list(set(
                 [x['id'] for x in market.context['trade_deltas'] if x['id'] in volume_trigger]))
-
-            if market.context.get('vp_trigger_selections') and market.seconds_to_start >= 30:
-                market.context['vp_trigger_seconds'].append(market.seconds_to_start)
+            market.context['vp_trigger_seconds'].append(round(market.seconds_to_start,2))
 
 class RecordLastXTrades(Middleware):
     def __call__(self, market) -> None:
@@ -189,6 +186,7 @@ class RecordLastXTrades(Middleware):
 class RecordTradeDeltas(Middleware):
     def __call__(self, market) -> None:
         if not market.market_book.streaming_update.get('rc'):
+            market.context['trade_deltas'] = []
             return
 
         traded_vol_update = [d for d in market.market_book.streaming_update['rc'] if
@@ -264,113 +262,55 @@ class RecordTargetLadders(Middleware):
                 if (market.seconds_to_start >= trig_sec - 60) and not market.market_book.inplay and market.status == "OPEN":
                     existing_trig_sec_target[0]['target'] = current_traded_ladders
 
-class CalculateVWAPTrigger(Middleware):
-    def __call__(self, market) -> None:
-        seconds_to_start = round(market.seconds_to_start / 5) * 5
-        vwaps = [{'selection_id': runner.selection_id, 'vwap': self.vwap(runner.ex.traded_volume)} for runner
-                          in market.market_book.runners]
-
-        vwap_dict = {
-                'seconds_to_start': seconds_to_start,
-                'vwaps': vwaps
-            }
-
-        # Initialise vwap list if doesn't exist
-        if not market.context.get('vwap_list'):
-            market.context['vwap_list'] = [vwap_dict]
-
-        # Get relevant vwap
-        latest_vl = [vl for vl in market.context['vwap_list'] if vl['seconds_to_start'] == seconds_to_start]
-
-        if latest_vl: # If it exists, update it with latest vwap
-            latest_vl[0]['vwaps'] = vwaps
-        else: # If not, append vwap
-            market.context['vwap_list'].append(vwap_dict)
-
-        # Keep only 30 seconds vwaps in context at a time
-        market.context['vwap_list'] = [x for x in market.context['vwap_list'] if x['seconds_to_start'] < seconds_to_start + 30]
-
-        if len(market.context['vwap_list']) == 6:
-            vwap_lists = [x['vwaps'] for x in market.context['vwap_list']]
-            market.context['vwap_triggers'] = []
-            for sel in market.market_book.runners:
-                selection_id = sel['selection_id']
-                vwaps_for_runner = [x['vwap'] for x in [selection for time in vwap_lists for selection in time] if x['selection_id'] == selection_id]
-                current_vwap = [x['vwap'] for x in vwaps if x['selection_id'] == selection_id][0]
-
-                if current_vwap != 0:
-                    vwap_ratio = current_vwap / mean(vwaps_for_runner)
-                    if vwap_ratio >= 1.03 or vwap_ratio <= 0.97:
-                        market.context['vwap_triggers'].append(selection_id)
-
-    def vwap(self, ladder):
-        total_vol = sum([x['size'] for x in ladder])
-        if total_vol > 0:
-            vwap = sum([x['price'] * x['size'] / total_vol for x in ladder])
-        else:
-            vwap = 0
-
-        return vwap
-
 class CalculatePriceTensor(Middleware):
     def __call__(self,market) -> None:
-        if not market.market_book.streaming_update.get('rc'):
+        if not market.context.get("vp_trigger_selections"):
+            market.context['price_list'] = {}
             return
 
-        if not market.context.get('vp_trigger_seconds'):
-            return
+        market_update_tensor_list = []
+        selection_ids = []
+        for runner in market.market_book.runners:
+            if runner.selection_id in market.context['top_selections']:
+                last_trades_tensor_list = [x['last_trades'] for x in market.context['last_x_trades'] if
+                                           x['id'] == runner.selection_id]
 
-        latest_trigger_second = min(market.context['vp_trigger_seconds'])
+                if last_trades_tensor_list:
+                    last_trades_tensor = torch.tensor(last_trades_tensor_list[0])
+                    last_trades_tensor[:, 2] = last_trades_tensor[:, 2] - market.seconds_to_start
+                else:
+                    last_trades_tensor = torch.tensor([])
 
-        # If there has been a trade and a trigger
-        if 180 >= market.seconds_to_start >= 30 and latest_trigger_second == market.seconds_to_start and \
-                [x for x in market.market_book.streaming_update['rc'] if 'tv' in x]:
+                traded_ladder_tensor = [[d['price'], d['size']] for d in runner.ex.traded_volume]
 
-            market_update_tensor_list = []
-            selection_ids = []
-            for runner in market.market_book.runners:
-                if runner.selection_id in market.context['top_selections']:
-                    last_trades_tensor_list = [x['last_trades'] for x in market.context['last_x_trades'] if
-                                               x['id'] == runner.selection_id]
+                # if len(traded_ladder_tensor) > market.context['max_traded_length']:
+                #     market.context['max_traded_length'] = len(traded_ladder_tensor)
 
-                    if last_trades_tensor_list:
-                        last_trades_tensor = torch.tensor(last_trades_tensor_list[0])
-                        last_trades_tensor[:, 2] = last_trades_tensor[:, 2] - market.seconds_to_start
-                    else:
-                        last_trades_tensor = torch.tensor([])
+                market_update_tensor_list.append(
+                    {
+                        "mover_flag": runner.selection_id in market.context['vp_trigger_selections'],
+                        "lpt": runner.last_price_traded,
+                        "back_ladder": torch.tensor(
+                            [[d['price'], d['size']] for d in runner.ex.available_to_back][:10]),
+                        "lay_ladder": torch.tensor(
+                            [[d['price'], d['size']] for d in runner.ex.available_to_lay][:10]),
+                        "traded_ladder": torch.tensor(traded_ladder_tensor),
+                        "last_trades": last_trades_tensor
+                    }
+                )
 
-                    traded_ladder_tensor = [[d['price'], d['size']] for d in runner.ex.traded_volume]
+                selection_ids.append(runner.selection_id)
 
-                    # if len(traded_ladder_tensor) > market.context['max_traded_length']:
-                    #     market.context['max_traded_length'] = len(traded_ladder_tensor)
+        if market.seconds_to_start < 0:
+            mss = -1
+        else:
+            mss = market.seconds_to_start
 
-                    market_update_tensor_list.append(
-                        {
-                            "mover_flag": runner.selection_id in market.context['vp_trigger_selections'],
-                            "lpt": runner.last_price_traded,
-                            "back_ladder": torch.tensor(
-                                [[d['price'], d['size']] for d in runner.ex.available_to_back][:10]),
-                            "lay_ladder": torch.tensor(
-                                [[d['price'], d['size']] for d in runner.ex.available_to_lay][:10]),
-                            "traded_ladder": torch.tensor(traded_ladder_tensor),
-                            "last_trades": last_trades_tensor
-                        }
-                    )
-
-                    selection_ids.append(runner.selection_id)
-
-            if market.seconds_to_start < 0:
-                mss = -1
-            else:
-                mss = market.seconds_to_start
-
-            market.context['price_list'] = {
-                    "market_id": market.market_id,
-                    "selection_ids": selection_ids,
-                    "seconds_to_start": mss,
-                    "price_tensor_list": market_update_tensor_list
-                }
-
+        market.context['price_list'] = {
+                "market_id": market.market_id,
+                "selection_ids": selection_ids,
+                "seconds_to_start": mss,
+                "price_tensor_list": market_update_tensor_list}
 
 class PriceInference(Middleware):
     def __init__(self, ckpt_path,tb_markets=None):
@@ -399,10 +339,8 @@ class PriceInference(Middleware):
         self.tb_markets = tb_markets
 
     def __call__(self, market) -> None:
-        if not market.context.get('vp_trigger_seconds'):
-            return
-
         if not market.context.get('price_list'):
+            market.context['scored_data'] = []
             return
 
         if self.tb_markets is None:
@@ -413,44 +351,39 @@ class PriceInference(Middleware):
         if not market_name:
             return
 
-        if market.seconds_to_start == min(market.context['vp_trigger_seconds']):
-            race_name_split = market_name[0].split()
-            race_type = race_name_split[2] if len(race_name_split) > 2 else "Unknown"
+        race_name_split = market_name[0].split()
+        race_type = race_name_split[2] if len(race_name_split) > 2 else "Unknown"
 
-            dict_to_score = self.collate_batch(
-                [process_dict(market.context['price_list'],
-                              track_name=market.market_book.market_definition.venue.lower(),
-                              race_type=race_type.lower(),
-                              max_traded_length=self.max_traded_length_train,
-                              min_sts=30,
-                              max_sts=180,
-                              back_lay_length=10,
-                              last_trades_len=100,
-                              track_to_int=self.track_to_int,
-                              rt_to_int=self.rt_to_int
-                              )],
-                has_target=False
-            )
+        dict_to_score = self.collate_batch(
+            [process_dict(market.context['price_list'],
+                          track_name=market.market_book.market_definition.venue.lower(),
+                          race_type=race_type.lower(),
+                          max_traded_length=self.max_traded_length_train,
+                          min_sts=30,
+                          max_sts=180,
+                          back_lay_length=10,
+                          last_trades_len=100,
+                          track_to_int=self.track_to_int,
+                          rt_to_int=self.rt_to_int
+                          )],
+            has_target=False
+        )
 
-            with torch.no_grad():
-                prediction = self.model(dict_to_score['pred_tensors']).view(1, 6, 3)
+        with torch.no_grad():
+            prediction = self.model(dict_to_score['pred_tensors']).view(1, 6, 3)
 
-            # Transform prices into ratio to LPT
-            prediction = (prediction * dict_to_score['pred_tensors']['lpts'].unsqueeze(2))
+        # Transform prices into ratio to LPT
+        prediction = (prediction * dict_to_score['pred_tensors']['lpts'].unsqueeze(2))
 
-            runner_dicts = []
-            for i, runner in enumerate(dict_to_score['metadata']['selection_ids'][0]):
-                dict_to_append = {
-                    'selection_id': runner,
-                    'predicted_max_price': round(prediction[0, i, 0].item(),2),
-                    'predicted_min_price': round(prediction[0, i, 1].item(),2),
-                    'predicted_wap': round(prediction[0, i, 2].item(),2)
-                }
+        runner_dicts = []
+        for i, runner in enumerate(dict_to_score['metadata']['selection_ids'][0]):
+            dict_to_append = {
+                'selection_id': runner,
+                'predicted_max_price': round(prediction[0, i, 0].item(),2),
+                'predicted_min_price': round(prediction[0, i, 1].item(),2),
+                'predicted_wap': round(prediction[0, i, 2].item(),2)
+            }
 
-                runner_dicts.append(dict_to_append)
+            runner_dicts.append(dict_to_append)
 
-            market.context['scored_data'] = runner_dicts
-
-        else: # TODO: See if constant betting is more profitable
-            market.context['scored_data'] = []
-
+        market.context['scored_data'] = runner_dicts

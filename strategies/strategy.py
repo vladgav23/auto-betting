@@ -62,24 +62,12 @@ class NeuralAutoTrader(BaseStrategy):
 
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
-            if runner_context.live_trade_count == 0:
-                if (predicted_wap / best_lay_price) >= 1.01 and mover_flag == False and runner.last_price_traded == best_lay_price:
-                    # create trade
-                    trade = Trade(market_book.market_id,runner.selection_id,runner.handicap,self)
-                    # create order
-                    entry_order = trade.create_order(side='LAY',order_type=LimitOrder(best_lay_price,self.stake_unit),
-                                                notes={
-                                                    'predicted_max': pred_max_price,
-                                                    'predicted_min': pred_min_price,
-                                                    'pred_price': predicted_wap,
-                                                    'market_seconds_to_start': market.seconds_to_start,
-                                                    'commission': market.context['commission'],
-                                                    'mover': mover_flag,
-                                                    'last_price': runner.last_price_traded
-                                                })
+            print("Mover flag: " + str(mover_flag))
+            print("WAP ratio: " + str(round(predicted_wap / best_back_price,3)))
+            print("Last price traded: " + str(runner.last_price_traded) + ", Best back price: " + str(best_back_price))
 
-                    market.place_order(entry_order)
-                elif (predicted_wap / best_back_price) <= 0.975 and mover_flag == True and runner.last_price_traded == best_back_price:
+            if runner_context.live_trade_count == 0:
+                if (predicted_wap / best_back_price) <= 0.975 and mover_flag == True and runner.last_price_traded == best_back_price:
                     # create trade
                     trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
                     # create order
@@ -89,67 +77,16 @@ class NeuralAutoTrader(BaseStrategy):
                                                          'predicted_min': pred_min_price,
                                                          'pred_price': predicted_wap,
                                                          'market_seconds_to_start': market.seconds_to_start,
-                                                         'commission': market.context['commission'],
+                                                         # 'commission': market.context['commission'],
                                                          'mover': mover_flag,
                                                          'last_price': runner.last_price_traded
                                                      })
 
                     market.place_order(entry_order)
 
-    # def process_orders(self, market, orders):
-    #     if not market.context.get('commission'):
-    #         return
-    #
-    #     for order in orders:
-    #         if order.notes['type'] == 'entry':
-    #             if not order.complete:
-    #                 if order.elapsed_seconds_created >= 10:
-    #                     market.cancel_order(order)
-    #
-    #             if order.complete and order.size_matched > 0:
-    #                 # Need to check if there are exit orders in place already
-    #                 existing_exit_orders = [x for x in order.trade.orders if x.notes['type'] == 'exit' and x.size_lapsed == 0.0 and x.status != OrderStatus.VIOLATION]
-    #
-    #                 if not existing_exit_orders:
-    #                     for tick in range(1, 3):
-    #                         if order.notes['projected'] == 'increase':
-    #                             exit_side = 'BACK'
-    #                             exit_price = flumine.utils.price_ticks_away(flumine.utils.get_nearest_price(order.average_price_matched), tick)
-    #
-    #                         elif order.notes['projected'] == 'decrease':
-    #                             exit_side = 'LAY'
-    #                             exit_price = flumine.utils.price_ticks_away(flumine.utils.get_nearest_price(order.average_price_matched), -tick)
-    #
-    #                         exit_order = order.trade.create_order(
-    #                             side=exit_side, order_type=LimitOrder(exit_price,round(order.size_matched/len(range(1,3)),2)),
-    #                             notes={
-    #                                 'type': 'exit',
-    #                                 'projected': order.notes['projected'],
-    #                                 'market_seconds_to_start': market.seconds_to_start,
-    #                                 'commission': market.context['commission'],
-    #                                 'seconds_to_execute_entry': order.elapsed_seconds_created
-    #                             }
-    #                         )
-    #
-    #                         market.place_order(exit_order)
-    #
-    #         elif order.notes['type'] == 'exit' and order.status == OrderStatus.EXECUTABLE:
-    #             runner = next(r for r in market.market_book.runners if r['selection_id'] == order.selection_id)
-    #             entry_order = next(x for x in order.trade.orders if x.notes['type'] == 'entry')
-    #             # If exit order not matched after 15 seconds, take best price as a stop loss
-    #             if not order.complete and order.elapsed_seconds_created + order.notes['seconds_to_execute_entry'] >= 65:
-    #                 if order.notes['projected'] == 'increase' and (order.notes.get('needs_replacing') == 1 or flumine.utils.price_ticks_away(runner.last_price_traded, 1) < entry_order.average_price_matched):
-    #                     order.notes['needs_replacing'] = 1
-    #                     market.replace_order(order, get_price(runner.ex.available_to_back,0))
-    #                 elif order.notes['projected'] == 'decrease' and (order.notes.get('needs_replacing')  == 1 or flumine.utils.price_ticks_away(runner.last_price_traded, -1) > entry_order.average_price_matched):
-    #                     order.notes['needs_replacing'] = 1
-    #                     market.replace_order(order, get_price(runner.ex.available_to_lay, 0))
-    #
-    #                 # if order.notes['seconds_to_execute_entry'] + order.elapsed_seconds_created >= 60:
-    #                 #     order.notes['replace_type'] = "too long"
-    #                 #     if order.notes['projected'] == 'increase':
-    #                 #         order.replace(new_price=get_price(runner.ex.available_to_back,0))
-    #                 #     elif order.notes['projected'] == 'decrease':
-    #                 #         order.replace(new_price=get_price(runner.ex.available_to_lay, 0))
-
+    def process_orders(self, market, orders):
+        for order in orders:
+            if not order.complete:
+                if order.elapsed_seconds_created >= 60:
+                    market.cancel_order(order)
 
