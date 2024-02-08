@@ -36,8 +36,8 @@ logger.addHandler(log_handler)
 
 # Params
 LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
-STAKE_UNIT = 0.1
-RUN_TYPE = 'live' # or 'test'
+STAKE_UNIT = 100
+RUN_TYPE = 'test' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
 MAX_TTJ = 300
 CKPT_PATH = "E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt"
@@ -83,6 +83,9 @@ def run_process(run_type, markets):
 
     with patch('builtins.open', smart_open.open):
         framework.add_market_middleware(
+            GetHistoricalCommission()
+        )
+        framework.add_market_middleware(
             RecordTradeDeltas()
         )
         framework.add_market_middleware(
@@ -106,8 +109,8 @@ def run_process(run_type, markets):
                 max_trade_count=3,
                 stake_unit=STAKE_UNIT,
                 max_back_price=15,
-                max_selection_exposure=100,
-                max_order_exposure=100,
+                max_selection_exposure=100000,
+                max_order_exposure=100000,
                 max_seconds_to_start=MAX_TTJ,
                 run_type=run_type,
                 conflate_ms=50
@@ -157,16 +160,17 @@ if __name__ == "__main__":
 
         data_files = [x for x in data_files if os.path.basename(x).rstrip(".bz2") in bsp_list]
 
+        random.shuffle(data_files)
         # random.seed(85083)
         # data_files = random.sample(data_files, 10)
 
         # data_files = [x for x in data_files if os.path.basename(x).startswith("1.215694796")]
 
-        processes = 6 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
+        processes = 8 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
         # processes = 1  # Returns the number of CPUs in the system.
         markets_per_process = 8   # 8 is optimal as it prevents data leakage.
 
-        # run_process(RUN_TYPE,data_files[:40])
+        # run_process(RUN_TYPE,data_files[:10])
 
         chunk = min(
             markets_per_process, math.ceil(len(data_files) / processes)

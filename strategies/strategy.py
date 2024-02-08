@@ -30,8 +30,8 @@ class NeuralAutoTrader(BaseStrategy):
 
     def process_market_book(self, market: Market, market_book: MarketBook) -> None:
         # If we don't have model_data, return
-        if not market.context.get('scored_data'):
-            return
+        # if not market.context.get('scored_data'):
+        #     return
 
         # If too far out from jump, return
         # if not self.max_seconds_to_start >= int(market.seconds_to_start) >= 90:
@@ -55,35 +55,44 @@ class NeuralAutoTrader(BaseStrategy):
             if best_back_price > self.max_back_price:
                 continue
 
-            pred_max_price = runner_data['predicted_max_price']
-            pred_min_price = runner_data['predicted_min_price']
+            # pred_max_price = runner_data['predicted_max_price']
+            # pred_min_price = runner_data['predicted_min_price']
             predicted_wap = runner_data['predicted_wap']
+            min_tp = [x['min_traded'] for x in market.context['sum_deltas'] if x['id'] == runner.selection_id]
+            max_tp = [x['max_traded'] for x in market.context['sum_deltas'] if x['id'] == runner.selection_id]
+
+            if not min_tp or not max_tp:
+                continue
+
             mover_flag = runner.selection_id in market.context['vp_trigger_selections']
+
+            runner_traded = next(x['trd'] for x in market.context['prev_traded_ladders'] if x['id'] == runner.selection_id)
+            runner_traded_wap = round(sum([x['price'] * x['size'] / runner.total_matched for x in runner_traded]),2)
 
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
-            print("Mover flag: " + str(mover_flag))
-            print("WAP ratio: " + str(round(predicted_wap / best_back_price,3)))
-            print("Last price traded: " + str(runner.last_price_traded) + ", Best back price: " + str(best_back_price))
+            # if mover_flag:
+            #     print("----------------------")
+            #     print("Runner: " + next(x.name for x in market.market_book.market_definition.runners if x.selection_id == runner.selection_id))
+            #     print("WAP ratio: " + str(round(predicted_wap / best_back_price,3)))
+            #     print("Last price traded: " + str(runner.last_price_traded) + ", Best back price: " + str(best_back_price))
 
             if runner_context.live_trade_count == 0:
-                if (predicted_wap / best_back_price) <= 0.975 and mover_flag == True and runner.last_price_traded == best_back_price:
+                if mover_flag and min_tp[0] > best_back_price and max_tp[0] > min_tp[0] and predicted_wap < runner_traded_wap and predicted_wap < best_back_price:
                     # create trade
                     trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
                     # create order
-                    entry_order = trade.create_order(side='BACK', order_type=LimitOrder(best_back_price, self.stake_unit),
+                    entry_order = trade.create_order(side='BACK', order_type=LimitOrder(flumine.utils.price_ticks_away(best_back_price,1), self.stake_unit),
                                                      notes={
-                                                         'predicted_max': pred_max_price,
-                                                         'predicted_min': pred_min_price,
+                                                         'runner_wap': runner_traded_wap,
                                                          'pred_price': predicted_wap,
                                                          'market_seconds_to_start': market.seconds_to_start,
-                                                         # 'commission': market.context['commission'],
+                                                         'commission': market.context['commission'],
                                                          'mover': mover_flag,
                                                          'last_price': runner.last_price_traded
                                                      })
 
                     market.place_order(entry_order)
-
     def process_orders(self, market, orders):
         for order in orders:
             if not order.complete:

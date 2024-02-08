@@ -7,8 +7,8 @@ import requests
 import pandas as pd
 import glob
 from flumine.markets.middleware import Middleware
-from statistics import mean
 from postprocessing import process_dict
+from itertools import groupby
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +138,18 @@ class CalculateVolumePriceTrigger(Middleware):
 
         market_total_vol = sum([runner['total_matched'] for runner in market.market_book.runners])
 
+        sorted_deltas = sorted(market.context['trade_deltas'], key=lambda x: x['id'])
+
+        # Compact solution using groupby from itertools
+        market.context['sum_deltas'] = [{
+            'id': key,
+            'size': sum(item['delta'][1] for item in items),  # Use items list
+            'min_traded': min(item['delta'][0] for item in items),  # Use items list
+            'max_traded': max(item['delta'][0] for item in items)  # Use items list
+        } for key, group in groupby(sorted_deltas, key=lambda x: x['id']) for items in [list(group)]]
+
         volume_trigger = set(
-            [x['id'] for x in market.context['trade_deltas'] if x['delta'][1] / market_total_vol >= 0.01])
+            [x['id'] for x in market.context['sum_deltas'] if x['size'] / market_total_vol >= 0.02])
 
         if not volume_trigger:
             market.context['vp_trigger_selections'] = []
