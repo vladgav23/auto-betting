@@ -9,6 +9,7 @@ import glob
 from flumine.markets.middleware import Middleware
 from statistics import mean
 from postprocessing import process_dict
+from itertools import groupby
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class GetHistoricalCommission(Middleware):
 
 class FindTopSelections(Middleware):
     def __call__(self, market) -> None:
-        if market.seconds_to_start <= 180 and not market.context.get('top_selections'):
+        if market.seconds_to_start <= 600 and not market.context.get('top_selections'):
             market.context['min_ltp'] = [{
                 'selection_id': x.selection_id,
                 'min_ltp': x.last_price_traded}
@@ -113,6 +114,42 @@ class FindTopSelections(Middleware):
 
             top_list = sorted(market.context['min_ltp'], key=lambda x: float('inf') if x['min_ltp'] is None else x['min_ltp'])[:6]
             market.context['top_selections'] = [x['selection_id'] for x in top_list]
+
+class CalculateWAPMetrics(Middleware):
+    def __call__(self, market) -> None:
+        market.context['last_trades_wap'] = []
+        market.context['traded_ladder_wap'] = []
+
+        if not market.context.get('last_x_trades'):
+            return
+        else:
+            for runner in market.context['last_x_trades']:
+                runner_last_trades_prev_15_seconds = [x for x in runner['last_trades'] if
+                                                      market.seconds_to_start + 15 >= x[2] >= market.seconds_to_start]
+                runner_total_matched_last_15 = sum(x[1] for x in runner_last_trades_prev_15_seconds)
+                runner_wap_last_15 = round(
+                    sum([x[0] * x[1] / runner_total_matched_last_15 for x in runner_last_trades_prev_15_seconds]), 2)
+
+                market.context['last_trades_wap'].append(
+                    {
+                        'id': runner['id'],
+                        'wap_last_15': runner_wap_last_15
+                    }
+                )
+
+        if not market.context.get('prev_traded_ladders'):
+            return
+        else:
+            for runner in market.context['prev_traded_ladders']:
+                runner_traded_total = sum([x['size'] for x in runner['trd']])
+                runner_total_wap = round(sum([x['price'] * x['size'] / runner_traded_total for x in runner['trd']]),2)
+
+                market.context['traded_ladder_wap'].append(
+                    {
+                        'id': runner['id'],
+                        'wap_total': runner_total_wap
+                    }
+                )
 
 class CalculateVolumePriceTrigger(Middleware):
     """
@@ -137,9 +174,18 @@ class CalculateVolumePriceTrigger(Middleware):
             return
 
         market_total_vol = sum([runner['total_matched'] for runner in market.market_book.runners])
+        sorted_deltas = sorted(market.context['trade_deltas'], key=lambda x: x['id'])
+
+        # Compact solution using groupby from itertools
+        market.context['sum_deltas'] = [{
+            'id': key,
+            'size': sum(item['delta'][1] for item in items),
+            'min_traded': min(item['delta'][0] for item in items),
+            'max_traded': max(item['delta'][0] for item in items)
+        } for key, group in groupby(sorted_deltas, key=lambda x: x['id']) for items in [list(group)]]
 
         volume_trigger = set(
-            [x['id'] for x in market.context['trade_deltas'] if x['delta'][1] / market_total_vol >= 0.01])
+            [x['id'] for x in market.context['sum_deltas'] if x['size'] / market_total_vol >= 0.01 and x['size'] > 50])
 
         if not volume_trigger:
             market.context['vp_trigger_selections'] = []
@@ -165,6 +211,8 @@ class RecordLastXTrades(Middleware):
             market.context['last_x_trades'] = []
 
         for delta in market.context['trade_deltas']:
+            if delta['delta'][1] < 5:
+                continue
             last_trades_for_id = [x['last_trades'] for x in market.context['last_x_trades'] if x['id'] == delta['id']]
             delta_to_append = delta['delta'] + [mss]
 
@@ -313,16 +361,16 @@ class CalculatePriceTensor(Middleware):
                 "price_tensor_list": market_update_tensor_list}
 
 class PriceInference(Middleware):
-    def __init__(self, ckpt_path,tb_markets=None):
+    def __init__(self, ckpt_path,track_to_int_path, rt_to_int_path,max_sts,suffix,tb_markets=None):
         from model.model import PriceLadderModel, PriceLadderDataModule
 
         ckpt_file = torch.load(ckpt_path, map_location="cpu")
         traded_weight = ckpt_file['state_dict']['proj_traded_ladder.weight']
         self.max_traded_length_train = int(traded_weight.shape[1] / 128)
-        with open("E:\Data\Extracted\Processed\TrainNew_track_to_int.json", 'r') as file:
+        with open(track_to_int_path, 'r') as file:
             self.track_to_int = json.load(file)
 
-        with open("E:\Data\Extracted\Processed\TrainNew_rt_to_int.json", 'r') as file:
+        with open(rt_to_int_path, 'r') as file:
             self.rt_to_int = json.load(file)
 
         self.model = PriceLadderModel(max_traded_length=self.max_traded_length_train,
@@ -337,10 +385,12 @@ class PriceInference(Middleware):
         self.collate_batch = PriceLadderDataModule.collate_batch
 
         self.tb_markets = tb_markets
+        self.max_sts = max_sts
+        self.suffix = suffix
 
     def __call__(self, market) -> None:
         if not market.context.get('price_list'):
-            market.context['scored_data'] = []
+            market.context['scored_data_'+self.suffix] = []
             return
 
         if self.tb_markets is None:
@@ -360,7 +410,7 @@ class PriceInference(Middleware):
                           race_type=race_type.lower(),
                           max_traded_length=self.max_traded_length_train,
                           min_sts=30,
-                          max_sts=180,
+                          max_sts=self.max_sts,
                           back_lay_length=10,
                           last_trades_len=100,
                           track_to_int=self.track_to_int,
@@ -386,4 +436,4 @@ class PriceInference(Middleware):
 
             runner_dicts.append(dict_to_append)
 
-        market.context['scored_data'] = runner_dicts
+        market.context['scored_data_'+self.suffix] = runner_dicts

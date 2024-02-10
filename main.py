@@ -21,8 +21,8 @@ from pathlib import Path
 
 
 from flumine.flumine import Flumine
-from middleware import GetHistoricalCommission, RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor
-from strategies.strategy import NeuralAutoTrader
+from middleware import GetHistoricalCommission, RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor, CalculateWAPMetrics
+from strategies.strategy import NeuralAutoTrader, LayModelledDrifters
 from logging_controls.logging_controls import OrderRecorder
 
 # Logging
@@ -36,11 +36,10 @@ logger.addHandler(log_handler)
 
 # Params
 LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
-STAKE_UNIT = 0.1
+STAKE_UNIT = 10
 RUN_TYPE = 'live' # or 'test'
-TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/2023/' # only need if RUN_TYPE is 'test'
-MAX_TTJ = 300
-CKPT_PATH = "E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt"
+TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/' # only need if RUN_TYPE is 'test'
+MAX_TTJ = 900
 
 if RUN_TYPE == 'live':
     logger.setLevel(logging.INFO)
@@ -81,7 +80,24 @@ def run_process(run_type, markets):
         client.min_bet_validation = False
         tb_markets = None
 
+    back_model = PriceInference(ckpt_path="E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt",
+                                track_to_int_path="E:/Data/Extracted/Processed/TrainNew_track_to_int.json",
+                                rt_to_int_path="E:/Data/Extracted/Processed/TrainNew_rt_to_int.json",
+                                max_sts=180,
+                                suffix="back",
+                                tb_markets=tb_markets)
+
+    lay_model = PriceInference(ckpt_path="E:/checkpoints/20240208_0754/price-ladder-epoch=01-val_loss=0.0958.ckpt",
+                                track_to_int_path="E:/Data/Extracted/Processed/Train_v3_track_to_int.json",
+                                rt_to_int_path="E:/Data/Extracted/Processed/Train_v3_rt_to_int.json",
+                                max_sts=600,
+                                suffix="lay",
+                                tb_markets=tb_markets)
+
     with patch('builtins.open', smart_open.open):
+        # framework.add_market_middleware(
+        #     GetHistoricalCommission()
+        # )
         framework.add_market_middleware(
             RecordTradeDeltas()
         )
@@ -92,13 +108,19 @@ def run_process(run_type, markets):
             FindTopSelections()
         )
         framework.add_market_middleware(
+            CalculateWAPMetrics()
+        )
+        framework.add_market_middleware(
             CalculateVolumePriceTrigger()
         )
         framework.add_market_middleware(
             CalculatePriceTensor()
         )
         framework.add_market_middleware(
-            PriceInference(ckpt_path=CKPT_PATH, tb_markets=tb_markets)
+            back_model
+        )
+        framework.add_market_middleware(
+            lay_model
         )
         framework.add_strategy(
             NeuralAutoTrader(
@@ -109,11 +131,21 @@ def run_process(run_type, markets):
                 max_selection_exposure=100,
                 max_order_exposure=100,
                 max_seconds_to_start=MAX_TTJ,
-                run_type=run_type,
-                conflate_ms=50
+                run_type=run_type
             )
         )
-
+        framework.add_strategy(
+            LayModelledDrifters(
+                market_filter=market_filter,
+                max_trade_count=3,
+                stake_unit=STAKE_UNIT,
+                max_back_price=15,
+                max_selection_exposure=100,
+                max_order_exposure=100,
+                max_seconds_to_start=MAX_TTJ,
+                run_type=run_type
+            )
+        )
         framework.add_logging_control(
             OrderRecorder(
                 logname=LOGNAME+'_'+RUN_TYPE
@@ -162,7 +194,7 @@ if __name__ == "__main__":
 
         # data_files = [x for x in data_files if os.path.basename(x).startswith("1.215694796")]
 
-        processes = 6 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
+        processes = 5 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
         # processes = 1  # Returns the number of CPUs in the system.
         markets_per_process = 8   # 8 is optimal as it prevents data leakage.
 

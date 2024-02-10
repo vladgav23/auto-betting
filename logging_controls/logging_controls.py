@@ -1,10 +1,14 @@
 import os
 import logging
 import csv
+# import telebot
 from flumine.controls.loggingcontrols import LoggingControl
 from flumine.order.ordertype import OrderTypes
 
 logger = logging.getLogger(__name__)
+# TOKEN = "6539995012:AAEUDJ2Ao0BcyfhqIDgMMIR65vwHttXOns4"
+# CHAT_ID = "-988781009"
+# bot = telebot.TeleBot(TOKEN)
 
 class OrderRecorder(LoggingControl):
     NAME = "ORDER_RECORDER"
@@ -75,6 +79,11 @@ class OrderRecorder(LoggingControl):
                 }
                 csv_writer = csv.DictWriter(m, delimiter=",", fieldnames=self.field_names)
                 csv_writer.writerow(order_data)
+
+            # bot.send_message(CHAT_ID, "Order cleared: "
+            #                           "\nRunner: " + order.notes['runner'].title() +
+            #                  "\nProfit: " + str(order.profit)
+            #                  )
 
             logger.info("Orders updated", extra={"order_count": len(orders)})
 
