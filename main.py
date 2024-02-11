@@ -1,10 +1,11 @@
 # Import libraries
 import time
 import logging
+
+import keyring
 import smart_open
 import itertools
 import os
-import mysql.connector
 import pandas as pd
 import random
 import math
@@ -17,12 +18,10 @@ from unittest.mock import patch
 from flumine import clients, FlumineSimulation, utils
 from pythonjsonlogger import jsonlogger
 from datetime import datetime
-from pathlib import Path
-
 
 from flumine.flumine import Flumine
-from middleware import GetHistoricalCommission, RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor, CalculateWAPMetrics
-from strategies.strategy import NeuralAutoTrader, LayModelledDrifters
+from middleware import RecordLastXTrades, FindTopSelections, PriceInference, CalculateVolumePriceTrigger, RecordTradeDeltas, CalculatePriceTensor, CalculateWAPMetrics
+from strategies.strategy import BackModelledFirmers, LayModelledDrifters
 from logging_controls.logging_controls import OrderRecorder
 
 # Logging
@@ -35,7 +34,7 @@ log_handler.setFormatter(formatter)
 logger.addHandler(log_handler)
 
 # Params
-LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_trade_strat'
+LOGNAME = datetime.now().strftime('%Y%m%d_%H%M')+'_back_and_lay'
 STAKE_UNIT = 10
 RUN_TYPE = 'live' # or 'test'
 TEST_DATA_PATH = 'E:/Data/Extracted/Raw/Holdout/' # only need if RUN_TYPE is 'test'
@@ -48,23 +47,17 @@ else:
 
 def run_process(run_type, markets):
     if run_type == 'live':
-        trading = betfairlightweight.APIClient("vladgav", "Cosmos1324=", app_key="00Fi1NHkj2pPuCVg")
+        trading = betfairlightweight.APIClient("vladgav", keyring.get_password("betfair","password"), app_key=keyring.get_password("betfair","api_key"))
         trading.login_interactive()
         client = clients.BetfairClient(trading)
         client.min_bet_validation = False
         framework = Flumine(client=client)
 
-        markets_and_names = trading.betting.list_market_catalogue(
-            betfairlightweight.filters.market_filter(
-                event_type_ids=['7'],
-                market_countries=['AU'],
-                market_type_codes=['WIN']
-            ),max_results=250,lightweight=True)
-
-        tb_markets = [x for x in markets_and_names if 'Trot' not in x['marketName'] and 'Pace' not in x['marketName']] # TODO: convert to worker maybe?
-
         market_filter = streaming_market_filter(
-            market_ids=[x['marketId'] for x in tb_markets]
+            event_type_ids=['7'],
+            country_codes=['AU'],
+            market_types=['WIN'],
+            race_types=['Flat']
         )
 
     elif run_type == 'test':
@@ -78,26 +71,20 @@ def run_process(run_type, markets):
         }
 
         client.min_bet_validation = False
-        tb_markets = None
 
     back_model = PriceInference(ckpt_path="E:/checkpoints/20240207_0454/price-ladder-epoch=01-val_loss=0.1158.ckpt",
                                 track_to_int_path="E:/Data/Extracted/Processed/TrainNew_track_to_int.json",
                                 rt_to_int_path="E:/Data/Extracted/Processed/TrainNew_rt_to_int.json",
                                 max_sts=180,
-                                suffix="back",
-                                tb_markets=tb_markets)
+                                suffix="back")
 
     lay_model = PriceInference(ckpt_path="E:/checkpoints/20240208_0754/price-ladder-epoch=01-val_loss=0.0958.ckpt",
                                 track_to_int_path="E:/Data/Extracted/Processed/Train_v3_track_to_int.json",
                                 rt_to_int_path="E:/Data/Extracted/Processed/Train_v3_rt_to_int.json",
                                 max_sts=600,
-                                suffix="lay",
-                                tb_markets=tb_markets)
+                                suffix="lay")
 
     with patch('builtins.open', smart_open.open):
-        # framework.add_market_middleware(
-        #     GetHistoricalCommission()
-        # )
         framework.add_market_middleware(
             RecordTradeDeltas()
         )
@@ -123,7 +110,7 @@ def run_process(run_type, markets):
             lay_model
         )
         framework.add_strategy(
-            NeuralAutoTrader(
+            BackModelledFirmers(
                 market_filter=market_filter,
                 max_trade_count=3,
                 stake_unit=STAKE_UNIT,
@@ -140,8 +127,8 @@ def run_process(run_type, markets):
                 max_trade_count=3,
                 stake_unit=STAKE_UNIT,
                 max_back_price=15,
-                max_selection_exposure=100,
-                max_order_exposure=100,
+                max_selection_exposure=150,
+                max_order_exposure=150,
                 max_seconds_to_start=MAX_TTJ,
                 run_type=run_type
             )
@@ -189,12 +176,14 @@ if __name__ == "__main__":
 
         data_files = [x for x in data_files if os.path.basename(x).rstrip(".bz2") in bsp_list]
 
+        random.shuffle(data_files)
+
         # random.seed(85083)
         # data_files = random.sample(data_files, 10)
 
         # data_files = [x for x in data_files if os.path.basename(x).startswith("1.215694796")]
 
-        processes = 5 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
+        processes = 10 #os.cpu_count() - 1  # Returns the number of CPUs in the system.
         # processes = 1  # Returns the number of CPUs in the system.
         markets_per_process = 8   # 8 is optimal as it prevents data leakage.
 

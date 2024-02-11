@@ -2,64 +2,13 @@ import logging
 import json
 import torch
 
-import flumine.utils
-import requests
 import pandas as pd
 import glob
 from flumine.markets.middleware import Middleware
-from statistics import mean
 from postprocessing import process_dict
 from itertools import groupby
 
 logger = logging.getLogger(__name__)
-
-class ScoredPricesMiddleware(Middleware):
-    def __init__(self, extra_fields_to_get):
-        self._runner_removals = []
-        self.first_scratching_update = 600
-        self.extra_fields_to_get = extra_fields_to_get
-
-    def __call__(self, market) -> None:
-        runner_removals = []
-
-        for runner in market.market_book.runners:
-            if runner.status == "ACTIVE":
-                continue
-            elif runner.status == "REMOVED":
-                _removal = runner.selection_id
-                if _removal not in self._runner_removals:
-                    self._runner_removals.append(_removal)
-                    runner_removals.append(_removal)
-
-        for _removal in runner_removals:
-            if market.seconds_to_start < self.first_scratching_update:
-                self._process_runner_removal(market, _removal)
-
-        if not market.context.get('model_data'):
-            self._update_prices(market)
-
-    def _process_runner_removal(self, market, removal_selection_id: int) -> None:
-        params = {
-            'market_id': market.market_id,
-            'extra_fields_to_get': self.extra_fields_to_get,
-            'extra_features': json.dumps({}),
-            'scratching': removal_selection_id
-        }
-
-        # Send the GET request with the parameters
-        response = requests.get("http://host.docker.internal:8000/process_scratching", params=params)
-        market.context["model_data"] = response.json()
-
-    def _update_prices(self, market):
-        params = {
-            'market_id': market.market_id,
-            'extra_fields_to_get': self.extra_fields_to_get,
-            'extra_features': json.dumps({})
-        }
-
-        # Send the GET request with the parameters
-        response = requests.get("http://host.docker.internal:8000/get_prices", params=params)
-        market.context["model_data"] = response.json()
 
 class GetPricesFromScoredHoldout(Middleware):
     def __init__(self, holdout_scored_path):
@@ -185,7 +134,7 @@ class CalculateVolumePriceTrigger(Middleware):
         } for key, group in groupby(sorted_deltas, key=lambda x: x['id']) for items in [list(group)]]
 
         volume_trigger = set(
-            [x['id'] for x in market.context['sum_deltas'] if x['size'] / market_total_vol >= 0.01 and x['size'] > 50])
+            [x['id'] for x in market.context['sum_deltas'] if x['size'] / market_total_vol >= 0.01 and x['size'] > 100])
 
         if not volume_trigger:
             market.context['vp_trigger_selections'] = []
@@ -331,9 +280,6 @@ class CalculatePriceTensor(Middleware):
 
                 traded_ladder_tensor = [[d['price'], d['size']] for d in runner.ex.traded_volume]
 
-                # if len(traded_ladder_tensor) > market.context['max_traded_length']:
-                #     market.context['max_traded_length'] = len(traded_ladder_tensor)
-
                 market_update_tensor_list.append(
                     {
                         "mover_flag": runner.selection_id in market.context['vp_trigger_selections'],
@@ -361,7 +307,7 @@ class CalculatePriceTensor(Middleware):
                 "price_tensor_list": market_update_tensor_list}
 
 class PriceInference(Middleware):
-    def __init__(self, ckpt_path,track_to_int_path, rt_to_int_path,max_sts,suffix,tb_markets=None):
+    def __init__(self, ckpt_path,track_to_int_path, rt_to_int_path,max_sts, suffix):
         from model.model import PriceLadderModel, PriceLadderDataModule
 
         ckpt_file = torch.load(ckpt_path, map_location="cpu")
@@ -384,7 +330,6 @@ class PriceInference(Middleware):
         self.model.eval()
         self.collate_batch = PriceLadderDataModule.collate_batch
 
-        self.tb_markets = tb_markets
         self.max_sts = max_sts
         self.suffix = suffix
 
@@ -393,20 +338,13 @@ class PriceInference(Middleware):
             market.context['scored_data_'+self.suffix] = []
             return
 
-        if self.tb_markets is None:
-            market_name = market.market_book.market_definition.name
-        else:
-            market_name = [x['marketName'] for x in self.tb_markets if x['marketId'] == market.market_id]
-
-        if not market_name:
-            return
-
+        market_name = market.market_catalogue.market_name
         race_name_split = market_name[0].split()
         race_type = race_name_split[2] if len(race_name_split) > 2 else "Unknown"
 
         dict_to_score = self.collate_batch(
             [process_dict(market.context['price_list'],
-                          track_name=market.market_book.market_definition.venue.lower(),
+                          track_name=market.market_catalogue.event.venue.lower(),
                           race_type=race_type.lower(),
                           max_traded_length=self.max_traded_length_train,
                           min_sts=30,

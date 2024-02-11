@@ -1,21 +1,19 @@
-import flumine.utils
-import shin
 import logging
 import telebot
 import keyring
-import pandas as pd
-import torch
 
 from flumine.markets.market import Market
 from betfairlightweight.resources import MarketBook
 from flumine import BaseStrategy
 from flumine.utils import get_price
 from flumine.order.trade import Trade
-from flumine.order.order import LimitOrder, OrderStatus
+from flumine.order.order import LimitOrder
 
 logger = logging.getLogger(__name__)
+CHAT_ID = keyring.get_password("telegram", "chat_id")
+bot = telebot.TeleBot(keyring.get_password("telegram", "token"))
 
-class NeuralAutoTrader(BaseStrategy):
+class BackModelledFirmers(BaseStrategy):
     def __init__(self, stake_unit, max_back_price, max_seconds_to_start, run_type, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.stake_unit = stake_unit
@@ -62,34 +60,48 @@ class NeuralAutoTrader(BaseStrategy):
 
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
-            # if mover_flag:
-            #     print("-----------------")
-            #     print("WAP ratio: " + str(round(predicted_wap / best_back_price,3)))
-            #     print("Last price traded: " + str(runner.last_price_traded) + ", Best back price: " + str(best_back_price) + ", Predicted WAP: " + str(predicted_wap))
-
             if runner_context.live_trade_count == 0:
-                if (predicted_wap / best_back_price) <= 0.975 and mover_flag == True and runner.last_price_traded == best_back_price and best_back_price <= 15:
+                if (predicted_wap / best_back_price) <= 0.975 and mover_flag and best_back_price <= 15:
                     # create trade
                     trade = Trade(market_book.market_id, runner.selection_id, runner.handicap, self)
                     # create order
                     entry_order = trade.create_order(side='BACK', order_type=LimitOrder(best_back_price, self.stake_unit),
                                                      notes={
+                                                         'race': market.market_catalogue.event.venue + " " + market.market_catalogue.market_name,
+                                                         'runner_name': next(
+                                                             x['runner_name'] for x in market.market_catalogue.runners
+                                                             if x.selection_id == runner.selection_id),
                                                          'predicted_max': pred_max_price,
                                                          'predicted_min': pred_min_price,
                                                          'pred_price': predicted_wap,
                                                          'market_seconds_to_start': market.seconds_to_start,
-                                                         # 'commission': market.context['commission'],
                                                          'mover': mover_flag,
-                                                         'last_price': runner.last_price_traded
+                                                         'last_price': runner.last_price_traded,
+                                                         'size_trig': next(
+                                                             x['size'] for x in market.context['sum_deltas'] if x['id'] == runner.selection_id
+                                                         )
                                                      })
 
                     market.place_order(entry_order)
 
+                    bot.send_message(CHAT_ID, "Bet placed: "
+                                              "\nRace: " + entry_order.notes['race'] +
+                                     "\nRunner: " + entry_order.notes['runner_name'] +
+                                     "\nSide: " + entry_order.side +
+                                     "\nPrice: " + str(best_back_price))
+
+
+
     def process_orders(self, market, orders):
         for order in orders:
-            if not order.complete:
-                if order.elapsed_seconds_created >= 60:
-                    market.cancel_order(order)
+            if not order.complete and order.elapsed_seconds_created >= 15:
+                market.cancel_order(order)
+
+                bot.send_message(CHAT_ID, "Bet cancelled: "
+                                          "\nRace: " + order.notes['race'] +
+                                 "\nRunner: " + order.notes['runner_name'] +
+                                 "\nSide: " + order.side +
+                                 "\nSize matched: " + str(order.size_matched))
 
 class LayModelledDrifters(BaseStrategy):
     def __init__(self, stake_unit, max_back_price, max_seconds_to_start, run_type, *args, **kwargs):
@@ -124,7 +136,6 @@ class LayModelledDrifters(BaseStrategy):
                 continue
 
             runner_data = runner_data[0]
-            best_back_price = get_price(runner.ex.available_to_back, 0)
             best_lay_price = get_price(runner.ex.available_to_lay, 0)
             mover_flag = runner.selection_id in market.context['vp_trigger_selections']
 
@@ -139,13 +150,6 @@ class LayModelledDrifters(BaseStrategy):
             if not runner_wap_last_15 or not runner_traded_wap:
                 continue
 
-            # if not mover_flag:
-            #     print("-----------------")
-            #     print("WAP ratio: " + str(round(predicted_wap / best_lay_price,3)))
-            #     print("Last price traded: " + str(runner.last_price_traded) + ", Best lay price: " + str(best_lay_price))
-            #     print(
-            #         "Predicted WAP: " + str(predicted_wap) + ", Runner WAP last 15: " + str(runner_wap_last_15[0]))
-
             runner_context = self.get_runner_context(market.market_id, runner.selection_id, runner.handicap)
 
             if runner_context.live_trade_count == 0:
@@ -156,18 +160,39 @@ class LayModelledDrifters(BaseStrategy):
                     entry_order = trade.create_order(side='LAY',
                                                      order_type=LimitOrder(best_lay_price, self.stake_unit),
                                                      notes={
+                                                         'race': market.market_catalogue.event.venue + " " + market.market_catalogue.market_name,
+                                                         'runner_name': next(
+                                                             x['runner_name'] for x in market.market_catalogue.runners
+                                                             if x.selection_id == runner.selection_id),
                                                          'predicted_max': pred_max_price,
                                                          'predicted_min': pred_min_price,
                                                          'pred_price': predicted_wap,
                                                          'market_seconds_to_start': market.seconds_to_start,
-                                                         # 'commission': market.context['commission'],
                                                          'mover': mover_flag,
-                                                         'last_price': runner.last_price_traded
+                                                         'last_price': runner.last_price_traded,
+                                                         'size_trig': next(
+                                                             x['size'] for x in market.context['sum_deltas'] if
+                                                             x['id'] == runner.selection_id
+                                                         )
                                                      })
 
                     market.place_order(entry_order)
+
+                    bot.send_message(CHAT_ID, "Bet placed: "
+                                              "\nRace: " + entry_order.notes['race'] +
+                                     "\nRunner: " + entry_order.notes['runner_name'] +
+                                     "\nSide: " + entry_order.side +
+                                     "\nPrice: " + str(best_lay_price))
+
+
 
     def process_orders(self, market, orders):
         for order in orders:
             if not order.complete and order.elapsed_seconds_created >= 15:
                 market.cancel_order(order)
+
+                bot.send_message(CHAT_ID, "Bet cancelled: "
+                                          "\nRace: " + order.notes['race'] +
+                                 "\nRunner: " + order.notes['runner_name'] +
+                                 "\nSide: " + order.side +
+                                 "\nSize matched: " + str(order.size_matched))
